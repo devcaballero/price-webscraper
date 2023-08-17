@@ -366,6 +366,36 @@ app.get('/fernet', async (req, res) => {
 
 
 
+app.get('/inflacionmensual', async (req, res) => {
+    try {
+        const url = 'http://estudiodelamo.com/inflacion-argentina-anual-mensual/';
+        const response = await axios.get(url);
+        const html = response.data;
+        const $ = cheerio.load(html);
+
+        // Buscar el elemento que contiene la información de inflación mensual
+        const infoElement = $('div:contains("fue de ")').first();
+
+        // Obtener el texto dentro del elemento
+        const infoText = infoElement.text();
+
+        // Extraer el valor de inflación mensual del texto
+        const startIndex = infoText.indexOf('fue de ') + 7;
+        const endIndex = infoText.indexOf('%', startIndex);
+        const inflation = infoText.substring(startIndex, endIndex).trim();
+
+        if (inflation) {
+            console.log(`Inflación mensual: ${inflation}`);
+            res.send(inflation);
+        } else {
+            console.log('No se pudo extraer la inflación mensual.');
+            res.status(404).send('Inflación no encontrada');
+        }
+    } catch (error) {
+        console.error(error);
+        res.status(500).send('Error en el servidor');
+    }
+});
 
 
 

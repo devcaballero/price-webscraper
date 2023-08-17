@@ -439,6 +439,32 @@ app.get('/temperatura', async (req, res) => {
 
 
 
+app.get('/johnnyred', async (req, res) => {
+    try {
+        const url = 'https://www.craftmoments.com.ar/producto/red-label/';
+        const response = await axios.get(url);
+        const html = response.data;
+        const $ = cheerio.load(html);
+
+        const precioElement = $('span.woocommerce-Price-amount').first(); // Usamos .first() para seleccionar solo el primer elemento
+        const precio = precioElement.text().trim();
+
+        if (precio) {
+            console.log(`Precio del Johnnie Walker Red Label: ${precio}`);
+            res.send(precio);
+        } else {
+            console.log('No se encontró el precio del Johnnie Walker Red Label');
+            res.status(404).send('Precio no encontrado');
+        }
+    } catch (error) {
+        console.error(error);
+        res.status(500).send('Error en el servidor');
+    }
+});
+
+
+
+
 
 app.listen(port, () => {
     console.log(`Servidor Express escuchando en el puerto ${port}`);

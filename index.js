@@ -3,6 +3,7 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const cors = require('cors');
 
+
 const app = express();
 app.use(cors());
 const port = 3000; // Choose a suitable port
@@ -336,6 +337,46 @@ app.get('/phillipbox', async (req, res) => {
         res.status(500).send('Error en el servidor');
     }
 });
+
+  
+app.get('/temperatura', async (req, res) => {
+    try {
+        const apiUrl = 'https://api.tomorrow.io/v4/timelines?location=-34.603722,-58.381592&fields=temperature&timesteps=1h&units=metric&apikey=gteJfd5gUxIr6vDZNQMsTSkW5YI3wUJF';
+        const response = await axios.get(apiUrl);
+
+        const data = response.data.data;
+        const timelines = data.timelines;
+
+        if (timelines.length > 0) {
+            const lastTimeline = timelines[timelines.length - 1];
+            const intervals = lastTimeline.intervals;
+
+            if (intervals.length > 0) {
+                const lastInterval = intervals[intervals.length - 1];
+                const temperature = lastInterval.values.temperature;
+
+                console.log(`Last Timeline: ${lastTimeline.endTime}`);
+                console.log(`Last Interval: ${lastInterval.startTime}`);
+                console.log(`Temperature: ${temperature}`);
+
+                const temperatureString = temperature.toString(); // Convertir el valor a cadena
+                res.send(temperatureString);
+            } else {
+                console.log('No intervals found.');
+                res.status(404).send('No intervals found.');
+            }
+        } else {
+            console.log('No timelines found.');
+            res.status(404).send('No timelines found.');
+        }
+    } catch (error) {
+        console.error(error);
+        res.status(500).send('Error en el servidor');
+    }
+});
+
+
+
 
 app.listen(port, () => {
     console.log(`Servidor Express escuchando en el puerto ${port}`);

@@ -338,6 +338,38 @@ app.get('/phillipbox', async (req, res) => {
     }
 });
 
+
+
+
+app.get('/fernet', async (req, res) => {
+    try {
+        const url = 'https://www.fullescabio.com/MLA-1374767171-fernet-branca-750-ml-fullescabio-_JM';
+        const response = await axios.get(url);
+        const html = response.data;
+        const $ = cheerio.load(html);
+
+        const precioText = $('span.andes-visually-hidden').text().trim();
+        const precio = precioText.match(/\d+/);
+
+        if (precio) {
+            console.log(`Precio del Fernet: ${precio}`);
+            res.send(`${precio}`);
+        } else {
+            console.log('No se encontró el precio del Fernet');
+            res.status(404).send('Precio no encontrado');
+        }
+    } catch (error) {
+        console.error(error);
+        res.status(500).send('Error en el servidor');
+    }
+});
+
+
+
+
+
+
+
   
 app.get('/temperatura', async (req, res) => {
     try {
@@ -357,7 +389,7 @@ app.get('/temperatura', async (req, res) => {
 
                 console.log(`Last Timeline: ${lastTimeline.endTime}`);
                 console.log(`Last Interval: ${lastInterval.startTime}`);
-                console.log(`Temperature: ${temperature}`);
+                console.log(`Temperatura: ${temperature}`);
 
                 const temperatureString = temperature.toString(); // Convertir el valor a cadena
                 res.send(temperatureString);

@@ -352,7 +352,7 @@ app.get('/fernet', async (req, res) => {
         const precio = precioText.match(/\d+/);
 
         if (precio) {
-            console.log(`Precio del Fernet: ${precio}`);
+            console.log(`Precio del Fernet x 750ml: ${precio}`);
             res.send(`${precio}`);
         } else {
             console.log('No se encontró el precio del Fernet');

@@ -8,7 +8,7 @@ const app = express();
 app.use(cors());
 const port = 3000; // Choose a suitable port
 
-app.get('/dolaroficial', async (req, res) => {
+app.get('/api/v1/dolar-oficial', async (req, res) => {
     try {
         let retorno = '';
 
@@ -24,6 +24,7 @@ app.get('/dolaroficial', async (req, res) => {
             const cotizacion = `$${cotizacionDouble.toFixed(2)}`;
             console.log(`Cotización del Dólar Oficial Venta: ${cotizacion}`);
             retorno = `${cotizacion}\n${retorno}`;
+            res.status(200);
         } else {
             console.log('No se encontró la cotización del dólar oficial.');
         }
@@ -35,7 +36,7 @@ app.get('/dolaroficial', async (req, res) => {
     }
 });
 
-app.get('/dolarblue', async (req, res) => {
+app.get('/api/v1/dolar-blue', async (req, res) => {
     try {
         // Obtener el precio del dólar blue
         const blueResponse = await axios.get('https://dolarhoy.com/');
@@ -48,17 +49,17 @@ app.get('/dolarblue', async (req, res) => {
         if (precioDolarBlueTexto) {
             const cotizacionDouble = parseFloat(precioDolarBlueTexto);
             const cotizacion = `$${cotizacionDouble.toFixed(2)}`;
-            console.log(`Cotización del Dólar Blue Venta: ${cotizacion}`);
             retorno = `${cotizacion}\n${retorno}`;
             
             // Usar una expresión regular para extraer el valor deseado
             const extractedValue = precioDolarBlueTexto.match(/\$([\d,]+)/);
             if (extractedValue && extractedValue[1]) {
-                console.log(`Valor extraído: ${extractedValue[1]}`);
+                console.log(`Cotización del Dólar Blue Venta: ${extractedValue[1]}`);
                 res.send(extractedValue[1]); // Enviar solo el valor extraído
+                res.status(200);
             } else {
-                console.log('No se pudo extraer el valor.');
-                res.status(404).send('Valor no encontrado');
+                console.log('No se pudo extraer el valor del dolar blue.');
+                res.status(404).send('Cotización no encontrada');
             }
         } else {
             console.log('No se encontró la cotización del dólar blue.');
@@ -70,7 +71,7 @@ app.get('/dolarblue', async (req, res) => {
     }
 });
 
-app.get('/oro', async (req, res) => {
+app.get('/api/v1/oro', async (req, res) => {
     try {
         const url = 'https://www.kitco.com/charts/livegold.html';
         let retorno = '';
@@ -90,8 +91,9 @@ app.get('/oro', async (req, res) => {
             retorno = formattedGoldPrice;
 
             res.send(retorno);
+            res.status(200);
         } else {
-            console.log('No se encontró la cotización del oro en la página.');
+            console.log('No se encontró la cotización del oro.');
             res.status(404).send('Cotización del oro no encontrada');
         }
     } catch (error) {
@@ -100,7 +102,7 @@ app.get('/oro', async (req, res) => {
     }
 });
 
-app.get('/naftasuper', async (req, res) => {
+app.get('/api/v1/nafta-super', async (req, res) => {
     try {
         const url = 'https://surtidores.com.ar/precios/';
         const fuelType = 'Super';
@@ -142,6 +144,7 @@ app.get('/naftasuper', async (req, res) => {
         }
         console.log(`El precio de la nafta 'Super' es : ${price}`);
         res.send(price.replace('.', ','));
+        res.status(200);
       
     } catch (error) {
         console.error(error);
@@ -149,7 +152,7 @@ app.get('/naftasuper', async (req, res) => {
     }
 });
 
-app.get('/bigmac', async (req, res) => {
+app.get('/api/v1/bigmac', async (req, res) => {
     try {
         const url = 'https://www.expatistan.com/es/precio/big-mac/buenos-aires';
         const response = await axios.get(url);
@@ -162,9 +165,10 @@ app.get('/bigmac', async (req, res) => {
             const precio = precioElement.text().trim().substring(5,10).replace(".", "");
             console.log(`El precio del bigmac es : ${precio}`);
             res.send(precio);
+            res.status(200);
         } else {
             console.log('No se encontró el precio del Big Mac en Buenos Aires');
-            res.status(404).send('Precio no encontrado');
+            res.status(404).send('Precio del bigmac no encontrado');
         }
     } catch (error) {
         console.error(error);
@@ -172,7 +176,7 @@ app.get('/bigmac', async (req, res) => {
     }
 });
 
-app.get('/heineken', async (req, res) => {
+app.get('/api/v1/heineken', async (req, res) => {
     try {
         const url = 'https://diaonline.supermercadosdia.com.ar/cerveza-heineken-envase-retornable-1-lt-61144/p';
         const response = await axios.get(url);
@@ -185,9 +189,10 @@ app.get('/heineken', async (req, res) => {
             const precio = precioElement.text().trim();
             console.log(`Precio de la Heineken de Litro: ${precio}`);
             res.send(precio);
+            res.status(200);
         } else {
             console.log('No se encontró el precio de la Heineken');
-            res.status(404).send('Precio no encontrado');
+            res.status(404).send('Precio de la heineken no encontrado');
         }
     } catch (error) {
         console.error(error);
@@ -195,7 +200,7 @@ app.get('/heineken', async (req, res) => {
     }
 });
 
-app.get('/cocacola', async (req, res) => {
+app.get('/api/v1/cocacola', async (req, res) => {
     try {
         const url = 'https://diaonline.supermercadosdia.com.ar/gaseosa-coca-cola-sabor-original-15-lts-16861/p';
         const response = await axios.get(url);
@@ -208,9 +213,10 @@ app.get('/cocacola', async (req, res) => {
             const precio = precioElement.text().trim();
             console.log(`Precio de la Coca-Cola de 1,5L: ${precio}`);
             res.send(precio);
+            res.status(200);
         } else {
             console.log('No se encontró el precio de la Coca-Cola');
-            res.status(404).send('Precio no encontrado');
+            res.status(404).send('Precio de la cocacola no encontrado');
         }
     } catch (error) {
         console.error(error);
@@ -218,7 +224,7 @@ app.get('/cocacola', async (req, res) => {
     }
 });
 
-app.get('/forrosprime', async (req, res) => {
+app.get('/api/v1/forros-prime', async (req, res) => {
     try {
         const url = 'https://www.farmalife.com.ar/prime-preserv-ultra-fino-x-3-/p';
         const response = await axios.get(url);
@@ -231,9 +237,10 @@ app.get('/forrosprime', async (req, res) => {
             const precio = precioElement.text().trim().replace('$', '').trim();
             console.log(`Precio del preservativos prime x3 unidades: ${precio}`);
             res.send(precio); 
+            res.status(200);
         } else {
-            console.log('No se encontró el precio del producto');
-            res.status(404).send('Precio no encontrado');
+            console.log('No se encontró el precio del prime');
+            res.status(404).send('Precio del primex3 no encontrado');
         }
     } catch (error) {
         console.error(error);
@@ -241,7 +248,7 @@ app.get('/forrosprime', async (req, res) => {
     }
 });
 
-app.get('/minimosube', async (req, res) => {
+app.get('/api/v1/minimo-sube', async (req, res) => {
     try {
         const url = 'https://www.argentina.gob.ar/redsube/tarifas-de-transporte-publico-amba-2021';
         const response = await axios.get(url);
@@ -265,9 +272,10 @@ app.get('/minimosube', async (req, res) => {
         if (tarifaEncontrada) {
             console.log(`Tarifa mínima de tarjeta sube: ${tarifa}`);
             res.send(tarifa);
+            res.status(200);
         } else {
-            console.log('No se encontró la tarifa en la tabla');
-            res.status(404).send('Tarifa no encontrada');
+            console.log('No se encontró la tarifa minima sube');
+            res.status(404).send('Tarifa minimia sube no encontrada');
         }
     } catch (error) {
         console.error(error);
@@ -275,7 +283,7 @@ app.get('/minimosube', async (req, res) => {
     }
 });
 
-app.get('/inflacionanualizada', async (req, res) => {
+app.get('/api/v1/inflacion-anualizada', async (req, res) => {
     try {
         const url = 'http://estudiodelamo.com/inflacion-argentina-anual-mensual/';
         const response = await axios.get(url);
@@ -294,9 +302,10 @@ app.get('/inflacionanualizada', async (req, res) => {
         if (inflation) {
             console.log(`Inflación anualizada : %${inflation}`);
             res.send(inflation);
+            res.status(200);
         } else {
             console.log('No se pudo extraer la inflación anualizada.');
-            res.status(404).send('Inflación no encontrada');
+            res.status(404).send('Inflación anualizada no encontrada');
         }
     } catch (error) {
         console.error(error);
@@ -311,7 +320,7 @@ function extractInflacionAnualizada(text) {
     return text.substring(startIndex, endIndex).trim();
 }
 
-app.get('/phillipbox', async (req, res) => {
+app.get('/api/v1/phillipbox', async (req, res) => {
     try {
         const url = 'https://www.tarducciytordini.com.ar/nv/public/precios-de-cigarrillos';
         const response = await axios.get(url);
@@ -328,9 +337,10 @@ app.get('/phillipbox', async (req, res) => {
             const precio = priceElement.text().trim();
             console.log(`Precio de PHILIP MORRIS BOX 20: ${precio}`);
             res.send(precio.replace('$', '').trim());
+            res.status(200);
         } else {
             console.log('No se encontró el precio de PHILIP MORRIS BOX 20');
-            res.status(404).send('Precio no encontrado');
+            res.status(404).send('Precio del phillipbox no encontrado');
         }
     } catch (error) {
         console.error(error);
@@ -341,19 +351,20 @@ app.get('/phillipbox', async (req, res) => {
 
 
 
-app.get('/fernet', async (req, res) => {
+app.get('/api/v1/fernet', async (req, res) => {
     try {
-        const url = 'https://www.fullescabio.com/MLA-1374767171-fernet-branca-750-ml-fullescabio-_JM';
+        const url = 'https://www.cotodigital3.com.ar/sitios/cdigi/producto/-fernet-branca---botella-750-cc/_/A-00005525-00005525-200';
         const response = await axios.get(url);
         const html = response.data;
         const $ = cheerio.load(html);
 
-        const precioText = $('span.andes-visually-hidden').text().trim();
-        const precio = precioText.match(/\d+/);
+        const precioText = $('span.atg_store_newPrice').text().trim();
+        const precio = precioText.match(/\d{1,3}(?:\.\d{3})*(?:,\d{2})?/);
 
         if (precio) {
             console.log(`Precio del Fernet x 750ml: ${precio}`);
             res.send(`${precio}`);
+            res.status(200);
         } else {
             console.log('No se encontró el precio del Fernet');
             res.status(404).send('Precio no encontrado');
@@ -366,7 +377,7 @@ app.get('/fernet', async (req, res) => {
 
 
 
-app.get('/inflacionmensual', async (req, res) => {
+app.get('/api/v1/inflacion-mensual', async (req, res) => {
     try {
         const url = 'http://estudiodelamo.com/inflacion-argentina-anual-mensual/';
         const response = await axios.get(url);
@@ -387,9 +398,10 @@ app.get('/inflacionmensual', async (req, res) => {
         if (inflation) {
             console.log(`Inflación mensual: ${inflation}`);
             res.send(inflation);
+            res.status(200);
         } else {
             console.log('No se pudo extraer la inflación mensual.');
-            res.status(404).send('Inflación no encontrada');
+            res.status(404).send('Inflación mensual no encontrada');
         }
     } catch (error) {
         console.error(error);
@@ -401,7 +413,7 @@ app.get('/inflacionmensual', async (req, res) => {
 
 
   
-app.get('/temperatura', async (req, res) => {
+app.get('/api/v1/temperatura', async (req, res) => {
     try {
         const apiUrl = 'https://api.tomorrow.io/v4/timelines?location=-34.603722,-58.381592&fields=temperature&timesteps=1h&units=metric&apikey=gteJfd5gUxIr6vDZNQMsTSkW5YI3wUJF';
         const response = await axios.get(apiUrl);
@@ -423,6 +435,7 @@ app.get('/temperatura', async (req, res) => {
 
                 const temperatureString = temperature.toString(); // Convertir el valor a cadena
                 res.send(temperatureString);
+                res.status(200);
             } else {
                 console.log('No intervals found.');
                 res.status(404).send('No intervals found.');
@@ -439,7 +452,7 @@ app.get('/temperatura', async (req, res) => {
 
 
 
-app.get('/johnnyred', async (req, res) => {
+app.get('/api/v1/johnny-red', async (req, res) => {
     try {
         const url = 'https://www.craftmoments.com.ar/producto/red-label/';
         const response = await axios.get(url);
@@ -452,6 +465,7 @@ app.get('/johnnyred', async (req, res) => {
         if (precio) {
             console.log(`Precio del Johnnie Walker Red Label: ${precio}`);
             res.send(precio);
+            res.status(200);
         } else {
             console.log('No se encontró el precio del Johnnie Walker Red Label');
             res.status(404).send('Precio no encontrado');

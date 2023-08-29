@@ -359,11 +359,12 @@ app.get('/api/v1/fernet', async (req, res) => {
         const $ = cheerio.load(html);
 
         const precioText = $('span.atg_store_newPrice').text().trim();
-        const precio = precioText.match(/\d{1,3}(?:\.\d{3})*(?:,\d{2})?/);
+        const precioMatches = precioText.match(/\d{1,3}(?:\.\d{3})*(?:,\d{2})?/);
+        const precio = precioMatches[0].replace(/\./g, '')
 
         if (precio) {
             console.log(`Precio del Fernet x 750ml: ${precio}`);
-            res.send(`${precio}`);
+            res.send(precio);
             res.status(200);
         } else {
             console.log('No se encontró el precio del Fernet');

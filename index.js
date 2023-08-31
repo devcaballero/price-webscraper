@@ -465,8 +465,7 @@ app.get('/api/v1/johnny-red', async (req, res) => {
 
         if (precio) {
             console.log(`Precio del Johnnie Walker Red Label: ${precio}`);
-            res.send(precio);
-            res.status(200);
+            res.status(200).send(precio);
         } else {
             console.log('No se encontró el precio del Johnnie Walker Red Label');
             res.status(404).send('Precio no encontrado');
@@ -479,6 +478,55 @@ app.get('/api/v1/johnny-red', async (req, res) => {
 
 
 
+app.get('/api/v1/promedio-precio-asado', async (req, res) => {
+    try {
+        const urls = [
+            'https://www.res.com.ar/asado.html',
+            'https://www.frigorifico90.com.ar/productos/asado-x-kg/',
+            'https://www.cotodigital3.com.ar/sitios/cdigi/producto/-asado-del-medio-estancias-coto-x-kg/_/A-00047979-00047979-200',
+            'https://www.briosa.com.ar/productos/asado-especial-x-kg/'
+        ];
+
+        const prices = [];
+
+        for (const url of urls) {
+            const response = await axios.get(url);
+            const html = response.data;
+            const $ = cheerio.load(html);
+
+            let precioText = '';
+
+            if (url.includes('res.com.ar')) {
+                precioText = $('span.price').text();
+            } else if (url.includes('frigorifico90.com.ar')) {
+                precioText = $('h3.js-price-display').text();
+            } else if (url.includes('cotodigital3.com.ar')) {
+                precioText = $('span.atg_store_newPrice').text();
+            } else if (url.includes('briosa.com.ar')) {
+                precioText = $('h2.js-price-display').text();
+            }
+
+            const precioMatches = precioText.match(/\d{1,3}(?:\.\d{3})*(?:,\d{2})?/);
+            
+            if (precioMatches && precioMatches.length > 0) {
+                const precio = parseFloat(precioMatches[0].replace(/\./g, '').replace(',', '.'));
+                prices.push(precio);
+            }
+        }
+
+        if (prices.length > 0) {
+            const averagePrice = prices.reduce((sum, price) => sum + price, 0) / prices.length;
+            console.log(`El promedio del precio del kilo de asado es: ${averagePrice.toFixed(2).replace('.', ',')}`);
+            res.status(200).send(averagePrice.toFixed(2).replace('.', ','));
+        } else {
+            console.log('No se encontraron precios válidos del kilo de asado en las páginas');
+            res.status(404).send('Precios del kilo de asado no encontrados');
+        }
+    } catch (error) {
+        console.error(error);
+        res.status(500).send('Error en el servidor');
+    }
+});
 
 
 app.listen(port, () => {

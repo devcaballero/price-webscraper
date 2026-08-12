@@ -2,24 +2,64 @@ const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const cors = require('cors');
+const https = require('https');
 
 const app = express();
 app.use(cors());
 const port = process.env.PORT || 3000;
 
+const browserHeaders = {
+  'User-Agent':
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  Accept: 'text/html,application/json,application/xhtml+xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'es-AR,es;q=0.9,en;q=0.8',
+};
+
 const http = axios.create({
   timeout: 20000,
+  headers: browserHeaders,
+  validateStatus: (status) => status >= 200 && status < 400,
+});
+
+/** Client JSON (Open-Meteo, etc.). Evita Accept: text/html que a veces rompe en hosting. */
+const jsonHttp = axios.create({
+  timeout: 25000,
   headers: {
-    'User-Agent':
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    Accept: 'text/html,application/json,application/xhtml+xml;q=0.9,*/*;q=0.8',
-    'Accept-Language': 'es-AR,es;q=0.9,en;q=0.8',
+    'User-Agent': 'hola-argentina-api/1.1 (+https://github.com/devcaballero/price-webscraper)',
+    Accept: 'application/json',
   },
+  httpsAgent: new https.Agent({
+    keepAlive: true,
+    minVersion: 'TLSv1.2',
+  }),
+  validateStatus: (status) => status >= 200 && status < 400,
+});
+
+/**
+ * BCRA publica la API con cadena de certificados incompleta.
+ * En Render eso dispara UNABLE_TO_GET_ISSUER_CERT_LOCALLY / "unable to get local issuer certificate".
+ */
+const bcraHttp = axios.create({
+  timeout: 25000,
+  headers: {
+    'User-Agent': 'hola-argentina-api/1.1 (+https://github.com/devcaballero/price-webscraper)',
+    Accept: 'application/json',
+  },
+  httpsAgent: new https.Agent({
+    keepAlive: true,
+    minVersion: 'TLSv1.2',
+    rejectUnauthorized: false,
+  }),
   validateStatus: (status) => status >= 200 && status < 400,
 });
 
 function sendError(res, error, fallback = 'Error en el servidor') {
-  console.error(error?.message || error);
+  console.error(
+    '[api-error]',
+    error?.code || '',
+    error?.message || error,
+    error?.response?.status || ''
+  );
   if (!res.headersSent) {
     res.status(500).send(fallback);
   }
@@ -765,57 +805,29 @@ app.get('/api/v1/inflacion-mensual', async (_req, res) => {
 
 app.get('/api/v1/tasa-bcra', async (_req, res) => {
   try {
-    // 160 = Tasa de política monetaria (TNA). Puede estar desactualizada si el régimen cambió.
-    // 7 = BADLAR bancos privados (TNA), referencia viva publicada por el BCRA.
-    const tpmLatest = await getBcraVariableLatest(160);
-    const maxAgeDays = 60;
-    const tpmFresh = tpmLatest && daysSince(tpmLatest.fecha) <= maxAgeDays;
+    // Preferimos BADLAR (viva). TPM (160) suele estar desactualizada y su serie a veces viene vacía.
+    const candidates = [
+      { idVariable: 7, codigo: 'BADLAR', nombre: 'BADLAR', meta: 'Referencia BCRA · TNA' },
+      { idVariable: 160, codigo: 'TPM', nombre: 'Política monetaria', meta: 'Tasa BCRA · TNA' },
+    ];
 
-    const selectedMeta = tpmFresh
-      ? {
-          idVariable: 160,
-          codigo: 'TPM',
-          nombre: 'Política monetaria',
-          meta: 'Tasa BCRA · TNA',
-        }
-      : {
-          idVariable: 7,
-          codigo: 'BADLAR',
-          nombre: 'BADLAR',
-          meta: 'Referencia BCRA · TNA',
-        };
+    let payload = null;
+    let lastError = null;
 
-    const series = await getBcraVariableSeries(selectedMeta.idVariable, 220);
-    const historial = buildBcraMonthlyHistorial(series, 6);
-    const latest = historial[historial.length - 1];
-
-    if (!latest) {
-      return res.status(404).send('Tasa BCRA no encontrada');
+    for (const meta of candidates) {
+      try {
+        payload = await buildTasaBcraPayload(meta);
+        if (payload) break;
+      } catch (error) {
+        lastError = error;
+        console.error(`Tasa BCRA ${meta.codigo} falló:`, error.message);
+      }
     }
 
-    const deltaPp = latest.deltaPp;
-    const payload = {
-      valor: latest.valor,
-      codigo: selectedMeta.codigo,
-      nombre: selectedMeta.nombre,
-      meta: selectedMeta.meta,
-      fecha: latest.fecha,
-      periodo: latest.periodo,
-      variacion:
-        deltaPp == null
-          ? null
-          : {
-              porcentaje: deltaPp,
-              unidad: 'pp',
-              direccion: deltaPp > 0 ? 'up' : deltaPp < 0 ? 'down' : 'flat',
-            },
-      historial: historial.map(({ fecha, periodo, valor, deltaPp: d }) => ({
-        fecha,
-        periodo,
-        valor,
-        deltaPp: d,
-      })),
-    };
+    if (!payload) {
+      if (lastError) return sendError(res, lastError);
+      return res.status(404).send('Tasa BCRA no encontrada');
+    }
 
     console.log(`Tasa BCRA ${payload.codigo} (${payload.fecha}): %${payload.valor}`);
     res.status(200).json(payload);
@@ -824,15 +836,65 @@ app.get('/api/v1/tasa-bcra', async (_req, res) => {
   }
 });
 
+async function buildTasaBcraPayload(selectedMeta) {
+  let series = [];
+  try {
+    series = await getBcraVariableSeries(selectedMeta.idVariable, 220);
+  } catch (error) {
+    console.error(`Serie ${selectedMeta.codigo} no disponible:`, error.message);
+  }
+
+  let historial = buildBcraMonthlyHistorial(series, 6);
+  let latest = historial[historial.length - 1];
+
+  // Fallback: solo último valor si la serie falla o viene vacía
+  if (!latest) {
+    const point = await getBcraVariableLatest(selectedMeta.idVariable);
+    if (!point || point.valor == null) return null;
+    const valorNum = Number(point.valor);
+    if (!Number.isFinite(valorNum)) return null;
+    latest = {
+      fecha: String(point.fecha).slice(0, 10),
+      periodo: formatIpcPeriodo(point.fecha),
+      valor: valorNum.toFixed(2).replace('.', ','),
+      deltaPp: null,
+    };
+    historial = [latest];
+  }
+
+  const deltaPp = latest.deltaPp;
+  return {
+    valor: latest.valor,
+    codigo: selectedMeta.codigo,
+    nombre: selectedMeta.nombre,
+    meta: selectedMeta.meta,
+    fecha: latest.fecha,
+    periodo: latest.periodo,
+    variacion:
+      deltaPp == null
+        ? null
+        : {
+            porcentaje: deltaPp,
+            unidad: 'pp',
+            direccion: deltaPp > 0 ? 'up' : deltaPp < 0 ? 'down' : 'flat',
+          },
+    historial: historial.map(({ fecha, periodo, valor, deltaPp: d }) => ({
+      fecha,
+      periodo,
+      valor,
+      deltaPp: d,
+    })),
+  };
+}
+
 async function getBcraVariableLatest(idVariable) {
-  const { data } = await http.get(
+  const { data } = await bcraHttp.get(
     `https://api.bcra.gob.ar/estadisticas/v4.0/Monetarias/${idVariable}`,
     { params: { limit: 1 } }
   );
   const row = data?.results?.[0]?.detalle?.[0];
   if (!row) {
-    // Fallback: metadata del listado
-    const list = await http.get('https://api.bcra.gob.ar/estadisticas/v4.0/Monetarias', {
+    const list = await bcraHttp.get('https://api.bcra.gob.ar/estadisticas/v4.0/Monetarias', {
       params: { IdVariable: idVariable },
     });
     const meta = list.data?.results?.[0];
@@ -848,7 +910,7 @@ async function getBcraVariableLatest(idVariable) {
 async function getBcraVariableSeries(idVariable, daysBack = 220) {
   const hasta = new Date().toISOString().slice(0, 10);
   const desde = isoMinusDays(hasta, daysBack);
-  const { data } = await http.get(
+  const { data } = await bcraHttp.get(
     `https://api.bcra.gob.ar/estadisticas/v4.0/Monetarias/${idVariable}`,
     {
       params: {
@@ -913,42 +975,136 @@ function daysSince(isoDate) {
 
 app.get('/api/v1/temperatura', async (_req, res) => {
   try {
-    const { data } = await http.get(
-      'https://api.open-meteo.com/v1/forecast',
-      {
-        params: {
-          latitude: -34.6037,
-          longitude: -58.3816,
-          current: 'temperature_2m,weather_code',
-          daily:
-            'weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant',
-          timezone: 'America/Argentina/Buenos_Aires',
-          forecast_days: 7,
-        },
-      }
-    );
-
-    const temperature = data?.current?.temperature_2m;
-    const weatherCode = data?.current?.weather_code;
-    if (temperature === undefined || temperature === null) {
-      return res.status(404).send('No intervals found.');
+    const payload = await getTemperaturaPayload();
+    if (!payload) {
+      return res.status(404).send('Temperatura no disponible');
     }
-
-    const condition = mapWeatherCondition(weatherCode);
-    const forecast = buildForecastDays(data?.daily);
-
-    console.log(`Temperatura: ${temperature} | código: ${weatherCode} | ${condition}`);
-    res.status(200).json({
-      temperature,
-      weatherCode,
-      condition,
-      label: weatherLabel(condition),
-      forecast,
-    });
+    console.log(
+      `Temperatura: ${payload.temperature} | código: ${payload.weatherCode} | ${payload.condition}`
+    );
+    res.status(200).json(payload);
   } catch (error) {
     sendError(res, error);
   }
 });
+
+async function getTemperaturaPayload() {
+  const attempts = [
+    () => fetchOpenMeteoWeather(jsonHttp),
+    () => fetchOpenMeteoWeather(http),
+    () => fetchWttrWeather(),
+  ];
+
+  for (const attempt of attempts) {
+    try {
+      const payload = await attempt();
+      if (payload) return payload;
+    } catch (error) {
+      console.error(
+        '[temperatura]',
+        error?.code || '',
+        error?.message || error,
+        error?.response?.status || ''
+      );
+    }
+  }
+
+  return null;
+}
+
+async function fetchOpenMeteoWeather(client) {
+  const { data } = await client.get('https://api.open-meteo.com/v1/forecast', {
+    params: {
+      latitude: -34.6037,
+      longitude: -58.3816,
+      current: 'temperature_2m,weather_code',
+      daily:
+        'weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant',
+      timezone: 'America/Argentina/Buenos_Aires',
+      forecast_days: 7,
+    },
+  });
+
+  const temperature = data?.current?.temperature_2m;
+  const weatherCode = data?.current?.weather_code;
+  if (temperature === undefined || temperature === null) {
+    throw new Error('Open-Meteo sin temperatura actual');
+  }
+
+  const condition = mapWeatherCondition(weatherCode);
+  return {
+    temperature,
+    weatherCode,
+    condition,
+    label: weatherLabel(condition),
+    forecast: buildForecastDays(data?.daily),
+  };
+}
+
+async function fetchWttrWeather() {
+  const { data } = await http.get('https://wttr.in/Buenos%20Aires', {
+    params: { format: 'j1' },
+    headers: { Accept: 'application/json' },
+  });
+
+  const current = data?.current_condition?.[0];
+  const temperature = Number(current?.temp_C);
+  if (!Number.isFinite(temperature)) {
+    throw new Error('wttr.in sin temperatura');
+  }
+
+  const code = Number(current?.weatherCode);
+  const condition = mapWttrCondition(code);
+  return {
+    temperature,
+    weatherCode: code,
+    condition,
+    label: weatherLabel(condition),
+    forecast: buildWttrForecast(data?.weather),
+  };
+}
+
+function mapWttrCondition(code) {
+  const n = Number(code);
+  if ([113].includes(n)) return 'sunny';
+  if ([116, 119].includes(n)) return 'partly';
+  if ([122, 143, 248, 260].includes(n)) return 'cloudy';
+  if (
+    (n >= 176 && n <= 377) ||
+    (n >= 386 && n <= 395) ||
+    [293, 296, 299, 302, 305, 308, 353, 356, 359].includes(n)
+  ) {
+    return 'rainy';
+  }
+  return 'cloudy';
+}
+
+function buildWttrForecast(days) {
+  if (!Array.isArray(days)) return [];
+  return days.slice(0, 7).map((day) => {
+    const hourly = day?.hourly || [];
+    const mid = hourly[Math.min(4, hourly.length - 1)] || hourly[0] || {};
+    const code = Number(mid.weatherCode ?? day.hourly?.[0]?.weatherCode);
+    const condition = mapWttrCondition(code);
+    const precipProb = Number(mid.chanceofrain ?? 0);
+    const precipSum = Number(day.totalSnow_cm ?? 0) > 0 ? Number(day.totalSnow_cm) : Number(mid.precipMM ?? 0);
+    const wind = Math.round(Number(mid.windspeedKmph ?? 0));
+    return {
+      date: day.date,
+      weatherCode: code,
+      condition,
+      label: weatherLabel(condition),
+      tempMax: Number(day.maxtempC),
+      tempMin: Number(day.mintempC),
+      precipProbability: precipProb,
+      precipSum,
+      showPrecip: condition === 'rainy' || precipProb >= 30 || precipSum > 0,
+      windMin: wind,
+      windMax: wind,
+      windDirection: Number(mid.winddirDegree ?? 0),
+    };
+  });
+}
 
 function buildForecastDays(daily) {
   if (!daily?.time?.length) return [];

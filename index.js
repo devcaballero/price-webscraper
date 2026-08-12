@@ -21,7 +21,7 @@ const http = axios.create({
   validateStatus: (status) => status >= 200 && status < 400,
 });
 
-/** Client JSON (APIs BCRA / Open-Meteo / etc.). Evita Accept: text/html que a veces rompe en hosting. */
+/** Client JSON (Open-Meteo, etc.). Evita Accept: text/html que a veces rompe en hosting. */
 const jsonHttp = axios.create({
   timeout: 25000,
   headers: {
@@ -35,8 +35,31 @@ const jsonHttp = axios.create({
   validateStatus: (status) => status >= 200 && status < 400,
 });
 
+/**
+ * BCRA publica la API con cadena de certificados incompleta.
+ * En Render eso dispara UNABLE_TO_GET_ISSUER_CERT_LOCALLY / "unable to get local issuer certificate".
+ */
+const bcraHttp = axios.create({
+  timeout: 25000,
+  headers: {
+    'User-Agent': 'hola-argentina-api/1.1 (+https://github.com/devcaballero/price-webscraper)',
+    Accept: 'application/json',
+  },
+  httpsAgent: new https.Agent({
+    keepAlive: true,
+    minVersion: 'TLSv1.2',
+    rejectUnauthorized: false,
+  }),
+  validateStatus: (status) => status >= 200 && status < 400,
+});
+
 function sendError(res, error, fallback = 'Error en el servidor') {
-  console.error(error?.message || error);
+  console.error(
+    '[api-error]',
+    error?.code || '',
+    error?.message || error,
+    error?.response?.status || ''
+  );
   if (!res.headersSent) {
     res.status(500).send(fallback);
   }
@@ -865,13 +888,13 @@ async function buildTasaBcraPayload(selectedMeta) {
 }
 
 async function getBcraVariableLatest(idVariable) {
-  const { data } = await jsonHttp.get(
+  const { data } = await bcraHttp.get(
     `https://api.bcra.gob.ar/estadisticas/v4.0/Monetarias/${idVariable}`,
     { params: { limit: 1 } }
   );
   const row = data?.results?.[0]?.detalle?.[0];
   if (!row) {
-    const list = await jsonHttp.get('https://api.bcra.gob.ar/estadisticas/v4.0/Monetarias', {
+    const list = await bcraHttp.get('https://api.bcra.gob.ar/estadisticas/v4.0/Monetarias', {
       params: { IdVariable: idVariable },
     });
     const meta = list.data?.results?.[0];
@@ -887,7 +910,7 @@ async function getBcraVariableLatest(idVariable) {
 async function getBcraVariableSeries(idVariable, daysBack = 220) {
   const hasta = new Date().toISOString().slice(0, 10);
   const desde = isoMinusDays(hasta, daysBack);
-  const { data } = await jsonHttp.get(
+  const { data } = await bcraHttp.get(
     `https://api.bcra.gob.ar/estadisticas/v4.0/Monetarias/${idVariable}`,
     {
       params: {
@@ -966,23 +989,31 @@ app.get('/api/v1/temperatura', async (_req, res) => {
 });
 
 async function getTemperaturaPayload() {
-  try {
-    return await fetchOpenMeteoWeather();
-  } catch (error) {
-    console.error('Open-Meteo falló:', error.message);
-  }
+  const attempts = [
+    () => fetchOpenMeteoWeather(jsonHttp),
+    () => fetchOpenMeteoWeather(http),
+    () => fetchWttrWeather(),
+  ];
 
-  try {
-    return await fetchWttrWeather();
-  } catch (error) {
-    console.error('wttr.in falló:', error.message);
+  for (const attempt of attempts) {
+    try {
+      const payload = await attempt();
+      if (payload) return payload;
+    } catch (error) {
+      console.error(
+        '[temperatura]',
+        error?.code || '',
+        error?.message || error,
+        error?.response?.status || ''
+      );
+    }
   }
 
   return null;
 }
 
-async function fetchOpenMeteoWeather() {
-  const { data } = await jsonHttp.get('https://api.open-meteo.com/v1/forecast', {
+async function fetchOpenMeteoWeather(client) {
+  const { data } = await client.get('https://api.open-meteo.com/v1/forecast', {
     params: {
       latitude: -34.6037,
       longitude: -58.3816,
@@ -1011,7 +1042,7 @@ async function fetchOpenMeteoWeather() {
 }
 
 async function fetchWttrWeather() {
-  const { data } = await jsonHttp.get('https://wttr.in/Buenos%20Aires', {
+  const { data } = await http.get('https://wttr.in/Buenos%20Aires', {
     params: { format: 'j1' },
     headers: { Accept: 'application/json' },
   });

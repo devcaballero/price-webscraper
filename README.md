@@ -60,10 +60,20 @@ Hay endpoints legacy adicionales (Fernet, Heineken, etc.) que el front actual pu
 - Bitcoin: [CoinGecko](https://www.coingecko.com/en/api) `market_chart`
 - Oro: [goldprice.dev](https://goldprice.dev) spot + barras diarias
 - Inflación: [apis.datos.gob.ar](https://apis.datos.gob.ar) (IPC nacional)
-- Tasa: [API BCRA v4](https://api.bcra.gob.ar) monetarias (TPM / BADLAR)
-- Clima: [Open-Meteo](https://open-meteo.com)
+- Tasa: [API BCRA v4](https://api.bcra.gob.ar) monetarias — BADLAR → TPM
+- Clima: [Open-Meteo](https://open-meteo.com) → [wttr.in](https://wttr.in) como alternativa
+- Big Mac: [bigmacindex.com](https://bigmacindex.com) → CSV [The Economist](https://github.com/TheEconomist/big-mac-data)
 
 Varias respuestas se cachean en memoria (dólar ~1h, BTC ~15m, oro ~30m, IPC ~6h) para no martillar las fuentes.
+
+## Fallbacks
+
+Helper reutilizable en `lib/fallbacks.js`:
+
+- `withFallbacks(sources, { label })` — cadena secuencial (primera fuente válida gana). Usado en clima, Big Mac y tasa BCRA.
+- `collectFromSources(sources, { label })` — acumula las que respondan (promedios asado/pan).
+
+Para agregar una alternativa a un endpoint nuevo: definir `{ name, fetch }` y pasarlo a `withFallbacks`.
 
 ## Deploy
 

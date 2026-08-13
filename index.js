@@ -3,6 +3,11 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const cors = require('cors');
 const https = require('https');
+const {
+  withFallbacks,
+  collectFromSources,
+  AllSourcesFailedError,
+} = require('./lib/fallbacks');
 
 const app = express();
 app.use(cors());
@@ -560,46 +565,52 @@ app.get('/api/v1/nafta-super', async (_req, res) => {
 
 app.get('/api/v1/bigmac', async (_req, res) => {
   try {
-    // 1) Precio local en ARS desde bigmacindex (actualización frecuente)
-    try {
-      const { data: html } = await http.get('https://bigmacindex.com/country/argentina');
-      const match = String(html).match(/ARS\s*([\d.,]+)/i);
-      if (match?.[1]) {
-        const precio = match[1].replace(/[^\d]/g, '');
-        if (precio) {
-          console.log(`El precio del bigmac es : ${precio}`);
-          return res.status(200).send(precio);
-        }
+    const { value: precio, source } = await withFallbacks(
+      [
+        { name: 'bigmacindex', fetch: fetchBigMacFromIndex },
+        { name: 'economist-csv', fetch: fetchBigMacFromEconomist },
+      ],
+      {
+        label: 'bigmac',
+        isValid: (v) => typeof v === 'string' && v.length > 0 && v !== 'NaN',
       }
-    } catch (error) {
-      console.error('bigmacindex falló, pruebo dataset The Economist:', error.message);
-    }
-
-    // 2) Fallback: Big Mac Index de The Economist (CSV semi-anual)
-    const { data: csv } = await http.get(
-      'https://raw.githubusercontent.com/TheEconomist/big-mac-data/master/output-data/big-mac-raw-index.csv'
     );
-    const rows = String(csv)
-      .trim()
-      .split('\n')
-      .filter((line) => line.includes(',ARG,') || line.includes(',Argentina,'));
-    const latest = rows[rows.length - 1];
-    if (!latest) {
-      return res.status(404).send('Precio del bigmac no encontrado');
-    }
-    // date,iso_a3,currency_code,name,local_price,...
-    const parts = latest.split(',');
-    const localPrice = parts[4];
-    const precio = String(Math.round(Number(localPrice)));
-    if (!precio || precio === 'NaN') {
-      return res.status(404).send('Precio del bigmac no encontrado');
-    }
-    console.log(`El precio del bigmac (Economist) es : ${precio}`);
+    console.log(`El precio del bigmac (${source}) es : ${precio}`);
     res.status(200).send(precio);
   } catch (error) {
+    if (error instanceof AllSourcesFailedError) {
+      return res.status(404).send('Precio del bigmac no encontrado');
+    }
     sendError(res, error);
   }
 });
+
+/** Precio local en ARS desde bigmacindex (actualización frecuente). */
+async function fetchBigMacFromIndex() {
+  const { data: html } = await http.get('https://bigmacindex.com/country/argentina');
+  const match = String(html).match(/ARS\s*([\d.,]+)/i);
+  const precio = match?.[1]?.replace(/[^\d]/g, '');
+  if (!precio) throw new Error('bigmacindex sin precio ARS');
+  return precio;
+}
+
+/** Fallback: Big Mac Index de The Economist (CSV semi-anual). */
+async function fetchBigMacFromEconomist() {
+  const { data: csv } = await http.get(
+    'https://raw.githubusercontent.com/TheEconomist/big-mac-data/master/output-data/big-mac-raw-index.csv'
+  );
+  const rows = String(csv)
+    .trim()
+    .split('\n')
+    .filter((line) => line.includes(',ARG,') || line.includes(',Argentina,'));
+  const latest = rows[rows.length - 1];
+  if (!latest) throw new Error('CSV Economist sin fila ARG');
+  // date,iso_a3,currency_code,name,local_price,...
+  const localPrice = latest.split(',')[4];
+  const precio = String(Math.round(Number(localPrice)));
+  if (!precio || precio === 'NaN') throw new Error('CSV Economist sin local_price válido');
+  return precio;
+}
 
 app.get('/api/v1/heineken', async (_req, res) => {
   try {
@@ -811,57 +822,65 @@ app.get('/api/v1/tasa-bcra', async (_req, res) => {
       { idVariable: 160, codigo: 'TPM', nombre: 'Política monetaria', meta: 'Tasa BCRA · TNA' },
     ];
 
-    let payload = null;
-    let lastError = null;
-
-    for (const meta of candidates) {
-      try {
-        payload = await buildTasaBcraPayload(meta);
-        if (payload) break;
-      } catch (error) {
-        lastError = error;
-        console.error(`Tasa BCRA ${meta.codigo} falló:`, error.message);
+    const { value: payload } = await withFallbacks(
+      candidates.map((meta) => ({
+        name: meta.codigo,
+        fetch: () => buildTasaBcraPayload(meta),
+      })),
+      {
+        label: 'tasa-bcra',
+        isValid: (p) => p != null && p.valor != null,
       }
-    }
-
-    if (!payload) {
-      if (lastError) return sendError(res, lastError);
-      return res.status(404).send('Tasa BCRA no encontrada');
-    }
+    );
 
     console.log(`Tasa BCRA ${payload.codigo} (${payload.fecha}): %${payload.valor}`);
     res.status(200).json(payload);
   } catch (error) {
+    if (error instanceof AllSourcesFailedError) {
+      if (error.lastError) return sendError(res, error.lastError);
+      return res.status(404).send('Tasa BCRA no encontrada');
+    }
     sendError(res, error);
   }
 });
 
 async function buildTasaBcraPayload(selectedMeta) {
-  let series = [];
-  try {
-    series = await getBcraVariableSeries(selectedMeta.idVariable, 220);
-  } catch (error) {
-    console.error(`Serie ${selectedMeta.codigo} no disponible:`, error.message);
-  }
+  const { value: latestBundle } = await withFallbacks(
+    [
+      {
+        name: `${selectedMeta.codigo}-serie`,
+        fetch: async () => {
+          const series = await getBcraVariableSeries(selectedMeta.idVariable, 220);
+          const historial = buildBcraMonthlyHistorial(series, 6);
+          const latest = historial[historial.length - 1];
+          if (!latest) throw new Error('serie mensual vacía');
+          return { latest, historial };
+        },
+      },
+      {
+        name: `${selectedMeta.codigo}-latest`,
+        fetch: async () => {
+          const point = await getBcraVariableLatest(selectedMeta.idVariable);
+          if (!point || point.valor == null) throw new Error('sin último valor');
+          const valorNum = Number(point.valor);
+          if (!Number.isFinite(valorNum)) throw new Error('último valor no numérico');
+          const latest = {
+            fecha: String(point.fecha).slice(0, 10),
+            periodo: formatIpcPeriodo(point.fecha),
+            valor: valorNum.toFixed(2).replace('.', ','),
+            deltaPp: null,
+          };
+          return { latest, historial: [latest] };
+        },
+      },
+    ],
+    {
+      label: `tasa-bcra-${selectedMeta.codigo}`,
+      isValid: (bundle) => bundle?.latest?.valor != null,
+    }
+  );
 
-  let historial = buildBcraMonthlyHistorial(series, 6);
-  let latest = historial[historial.length - 1];
-
-  // Fallback: solo último valor si la serie falla o viene vacía
-  if (!latest) {
-    const point = await getBcraVariableLatest(selectedMeta.idVariable);
-    if (!point || point.valor == null) return null;
-    const valorNum = Number(point.valor);
-    if (!Number.isFinite(valorNum)) return null;
-    latest = {
-      fecha: String(point.fecha).slice(0, 10),
-      periodo: formatIpcPeriodo(point.fecha),
-      valor: valorNum.toFixed(2).replace('.', ','),
-      deltaPp: null,
-    };
-    historial = [latest];
-  }
-
+  const { latest, historial } = latestBundle;
   const deltaPp = latest.deltaPp;
   return {
     valor: latest.valor,
@@ -989,27 +1008,23 @@ app.get('/api/v1/temperatura', async (_req, res) => {
 });
 
 async function getTemperaturaPayload() {
-  const attempts = [
-    () => fetchOpenMeteoWeather(jsonHttp),
-    () => fetchOpenMeteoWeather(http),
-    () => fetchWttrWeather(),
-  ];
-
-  for (const attempt of attempts) {
-    try {
-      const payload = await attempt();
-      if (payload) return payload;
-    } catch (error) {
-      console.error(
-        '[temperatura]',
-        error?.code || '',
-        error?.message || error,
-        error?.response?.status || ''
-      );
-    }
+  try {
+    const { value } = await withFallbacks(
+      [
+        { name: 'open-meteo-json', fetch: () => fetchOpenMeteoWeather(jsonHttp) },
+        { name: 'open-meteo-http', fetch: () => fetchOpenMeteoWeather(http) },
+        { name: 'wttr', fetch: () => fetchWttrWeather() },
+      ],
+      {
+        label: 'temperatura',
+        isValid: (p) => p != null && p.temperature != null,
+      }
+    );
+    return value;
+  } catch (error) {
+    if (error instanceof AllSourcesFailedError) return null;
+    throw error;
   }
-
-  return null;
 }
 
 async function fetchOpenMeteoWeather(client) {
@@ -1175,42 +1190,51 @@ app.get('/api/v1/johnny-red', async (_req, res) => {
   }
 });
 
-async function averagePriceFromSources(sources) {
-  const prices = [];
-
-  for (const source of sources) {
-    try {
-      const { data: html } = await http.get(source.url);
-      const $ = cheerio.load(html);
-      const precioText = source.selector($);
-      const precioMatches = String(precioText).match(/\d{1,3}(?:\.\d{3})*(?:,\d{2})?/);
-      if (precioMatches?.length) {
-        prices.push(parseFloat(precioMatches[0].replace(/\./g, '').replace(',', '.')));
-      }
-    } catch (error) {
-      console.error(`Fuente falló (${source.url}):`, error.message);
+async function averagePriceFromSources(sources, label = 'precios') {
+  const { values } = await collectFromSources(
+    sources.map((source) => ({
+      name: source.name || source.url,
+      fetch: async () => {
+        const { data: html } = await http.get(source.url);
+        const $ = cheerio.load(html);
+        const precioText = source.selector($);
+        const precioMatches = String(precioText).match(/\d{1,3}(?:\.\d{3})*(?:,\d{2})?/);
+        if (!precioMatches?.length) {
+          throw new Error('sin precio parseable');
+        }
+        return parseFloat(precioMatches[0].replace(/\./g, '').replace(',', '.'));
+      },
+    })),
+    {
+      label,
+      isValid: (n) => Number.isFinite(n),
     }
-  }
-
-  return prices;
+  );
+  return values;
 }
 
 app.get('/api/v1/promedio-precio-asado', async (_req, res) => {
   try {
-    const prices = await averagePriceFromSources([
-      {
-        url: 'https://www.res.com.ar/asado.html',
-        selector: ($) => $('span.price').text(),
-      },
-      {
-        url: 'https://www.frigorifico90.com.ar/productos/asado-x-kg/',
-        selector: ($) => $('h3.js-price-display').text(),
-      },
-      {
-        url: 'https://www.briosa.com.ar/productos/asado-especial-x-kg/',
-        selector: ($) => $('h2.js-price-display').text(),
-      },
-    ]);
+    const prices = await averagePriceFromSources(
+      [
+        {
+          name: 'res.com.ar',
+          url: 'https://www.res.com.ar/asado.html',
+          selector: ($) => $('span.price').text(),
+        },
+        {
+          name: 'frigorifico90',
+          url: 'https://www.frigorifico90.com.ar/productos/asado-x-kg/',
+          selector: ($) => $('h3.js-price-display').text(),
+        },
+        {
+          name: 'briosa',
+          url: 'https://www.briosa.com.ar/productos/asado-especial-x-kg/',
+          selector: ($) => $('h2.js-price-display').text(),
+        },
+      ],
+      'asado'
+    );
 
     if (!prices.length) {
       return res.status(404).send('Precios del kilo de asado no encontrados');
@@ -1227,20 +1251,26 @@ app.get('/api/v1/promedio-precio-asado', async (_req, res) => {
 
 app.get('/api/v1/promedio-precio-pan', async (_req, res) => {
   try {
-    const prices = await averagePriceFromSources([
-      {
-        url: 'https://montevende.com.ar/?product=pan-por-k-g',
-        selector: ($) => $('span.woocommerce-Price-amount').text(),
-      },
-      {
-        url: 'https://productosfrontera.com.ar/producto/pan-de-mesa-mignon-x-kilo/',
-        selector: ($) => $('span.woocommerce-Price-amount').text(),
-      },
-      {
-        url: 'https://www.panaderiasanfrancisco.com.ar/productos/pan-mignon-x-1-kilo/',
-        selector: ($) => $('span.price.product-price.js-price-display').text(),
-      },
-    ]);
+    const prices = await averagePriceFromSources(
+      [
+        {
+          name: 'montevende',
+          url: 'https://montevende.com.ar/?product=pan-por-k-g',
+          selector: ($) => $('span.woocommerce-Price-amount').text(),
+        },
+        {
+          name: 'productosfrontera',
+          url: 'https://productosfrontera.com.ar/producto/pan-de-mesa-mignon-x-kilo/',
+          selector: ($) => $('span.woocommerce-Price-amount').text(),
+        },
+        {
+          name: 'panaderiasanfrancisco',
+          url: 'https://www.panaderiasanfrancisco.com.ar/productos/pan-mignon-x-1-kilo/',
+          selector: ($) => $('span.price.product-price.js-price-display').text(),
+        },
+      ],
+      'pan'
+    );
 
     if (!prices.length) {
       return res.status(404).send('Precios del kilo de pan no encontrados');

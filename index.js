@@ -1254,19 +1254,24 @@ app.get('/api/v1/promedio-precio-pan', async (_req, res) => {
     const prices = await averagePriceFromSources(
       [
         {
-          name: 'montevende',
-          url: 'https://montevende.com.ar/?product=pan-por-k-g',
-          selector: ($) => $('span.woocommerce-Price-amount').text(),
+          name: 'briosa',
+          url: 'https://www.briosa.com.ar/productos/pan-mignon-x-kg/',
+          selector: ($) => $('.js-price-display').first().text(),
         },
         {
-          name: 'productosfrontera',
-          url: 'https://productosfrontera.com.ar/producto/pan-de-mesa-mignon-x-kilo/',
-          selector: ($) => $('span.woocommerce-Price-amount').text(),
+          name: 'clargentina',
+          url: 'https://www.clargentina.com.ar/productos/pan-frances-x-kilo/',
+          selector: ($) => $('.js-price-display').first().text(),
         },
         {
-          name: 'panaderiasanfrancisco',
-          url: 'https://www.panaderiasanfrancisco.com.ar/productos/pan-mignon-x-1-kilo/',
-          selector: ($) => $('span.price.product-price.js-price-display').text(),
+          name: 'nuevosiglo',
+          url: 'https://fiambrerianuevosiglo.com.ar/productos/pan-frances-x1kg/',
+          selector: ($) => $('.js-price-display').first().text(),
+        },
+        {
+          name: 'tuchanguito',
+          url: 'https://www.tuchanguito.com.ar/productos/pan-frances-x-kg/',
+          selector: ($) => $('.js-price-display').first().text(),
         },
       ],
       'pan'

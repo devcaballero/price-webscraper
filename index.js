@@ -2,12 +2,20 @@ const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const cors = require('cors');
+const dns = require('dns');
 const https = require('https');
 const {
   withFallbacks,
   collectFromSources,
   AllSourcesFailedError,
 } = require('./lib/fallbacks');
+
+// En Render, resolver IPv6 primero suele colgar APIs externas (Open-Meteo).
+try {
+  dns.setDefaultResultOrder('ipv4first');
+} catch {
+  // Node < 16.13
+}
 
 const app = express();
 app.use(cors());
@@ -26,19 +34,36 @@ const http = axios.create({
   validateStatus: (status) => status >= 200 && status < 400,
 });
 
+const jsonHeaders = {
+  'User-Agent': 'hola-argentina-api/1.1 (+https://github.com/devcaballero/price-webscraper)',
+  Accept: 'application/json',
+};
+
+const ipv4HttpsAgent = new https.Agent({
+  keepAlive: true,
+  minVersion: 'TLSv1.2',
+  // Render a veces falla IPv6 hacia APIs externas; forzar IPv4.
+  family: 4,
+});
+
+const defaultHttpsAgent = new https.Agent({
+  keepAlive: true,
+  minVersion: 'TLSv1.2',
+});
+
 /** Client JSON (Open-Meteo, etc.). Evita Accept: text/html que a veces rompe en hosting. */
 const jsonHttp = axios.create({
   timeout: 25000,
-  headers: {
-    'User-Agent': 'hola-argentina-api/1.1 (+https://github.com/devcaballero/price-webscraper)',
-    Accept: 'application/json',
-  },
-  httpsAgent: new https.Agent({
-    keepAlive: true,
-    minVersion: 'TLSv1.2',
-    // Render a veces falla IPv6 hacia APIs externas; forzar IPv4.
-    family: 4,
-  }),
+  headers: jsonHeaders,
+  httpsAgent: ipv4HttpsAgent,
+  validateStatus: (status) => status >= 200 && status < 400,
+});
+
+/** Misma config sin forzar family: por si el Agent family:4 falla en algún runtime. */
+const jsonHttpAuto = axios.create({
+  timeout: 25000,
+  headers: jsonHeaders,
+  httpsAgent: defaultHttpsAgent,
   validateStatus: (status) => status >= 200 && status < 400,
 });
 
@@ -1062,17 +1087,26 @@ app.get('/api/v1/temperatura', async (_req, res) => {
 
 async function getTemperaturaPayload() {
   try {
-    // Paralelo: Open-Meteo (7 días) vs wttr (3 días). Preferimos OM siempre que responda.
+    // Paralelo: Open-Meteo (7 días, varios transportes) vs wttr (3 días) vs Met.no (rescate 7d).
     const settled = await Promise.allSettled([
       fetchOpenMeteoWeather(jsonHttp).then((payload) => ({
-        name: 'open-meteo-json',
+        name: 'open-meteo-ipv4',
+        payload,
+      })),
+      fetchOpenMeteoWeather(jsonHttpAuto).then((payload) => ({
+        name: 'open-meteo-auto',
         payload,
       })),
       fetchOpenMeteoWeather(http).then((payload) => ({
         name: 'open-meteo-http',
         payload,
       })),
+      fetchOpenMeteoNative().then((payload) => ({
+        name: 'open-meteo-native',
+        payload,
+      })),
       fetchWttrWeather().then((payload) => ({ name: 'wttr', payload })),
+      fetchMetNoWeather().then((payload) => ({ name: 'met-no', payload })),
     ]);
 
     const ok = settled
@@ -1093,43 +1127,27 @@ async function getTemperaturaPayload() {
     if (!ok.length) return null;
 
     const openMeteo = ok.find((x) => x.name.startsWith('open-meteo'));
+    const metNo = ok.find((x) => x.name === 'met-no');
     const wttr = ok.find((x) => x.name === 'wttr');
 
-    if (openMeteo) {
+    const preferred = [openMeteo, metNo].find(
+      (x) => (x?.payload?.forecast?.length || 0) >= 7
+    ) || openMeteo || metNo;
+
+    if (preferred) {
       console.log(
-        `[temperatura] fuente: ${openMeteo.name} | días=${openMeteo.payload.forecast?.length || 0}`
+        `[temperatura] fuente: ${preferred.name} | días=${preferred.payload.forecast?.length || 0}`
       );
-      return openMeteo.payload;
+      if (preferred.name === 'met-no' && wttr?.payload) {
+        return mergeForecastSunTimes(preferred.payload, wttr.payload);
+      }
+      return preferred.payload;
     }
 
-    // Solo wttr: intenta rescatar el forecast de 7 días desde Open-Meteo.
+    // Solo wttr (3 días): si Met.no/OM llegaron sin temperature filter miss, reintentar forecast.
     if (wttr) {
-      try {
-        const om = await fetchOpenMeteoWeather(jsonHttp);
-        if (om?.forecast?.length) {
-          console.log(
-            `[temperatura] fuente: wttr+open-meteo-forecast | días=${om.forecast.length}`
-          );
-          return {
-            ...wttr.payload,
-            // Condición/temp actuales: preferir OM si el rescate trae current válido
-            temperature: om.temperature ?? wttr.payload.temperature,
-            weatherCode: om.weatherCode ?? wttr.payload.weatherCode,
-            condition: om.condition ?? wttr.payload.condition,
-            label: om.label ?? wttr.payload.label,
-            humidity: om.humidity ?? wttr.payload.humidity,
-            sunrise: om.sunrise ?? wttr.payload.sunrise,
-            sunset: om.sunset ?? wttr.payload.sunset,
-            forecast: om.forecast,
-          };
-        }
-      } catch (error) {
-        console.error(
-          '[temperatura] rescate open-meteo forecast falló:',
-          error?.code || '',
-          error?.message || error
-        );
-      }
+      const rescued = await rescueExtendedForecast(wttr.payload);
+      if (rescued) return rescued;
 
       console.log(
         `[temperatura] fuente: wttr | días=${wttr.payload.forecast?.length || 0}`
@@ -1144,19 +1162,126 @@ async function getTemperaturaPayload() {
   }
 }
 
+async function rescueExtendedForecast(wttrPayload) {
+  const attempts = [
+    () => fetchOpenMeteoWeather(jsonHttpAuto),
+    () => fetchOpenMeteoNative(),
+    () => fetchMetNoWeather(),
+  ];
+
+  for (const attempt of attempts) {
+    try {
+      const om = await attempt();
+      if (!om?.forecast?.length) continue;
+      console.log(
+        `[temperatura] fuente: wttr+${om.forecast.length >= 7 ? 'extended' : 'partial'} | días=${om.forecast.length}`
+      );
+      return mergeForecastSunTimes(
+        {
+          ...wttrPayload,
+          temperature: om.temperature ?? wttrPayload.temperature,
+          weatherCode: om.weatherCode ?? wttrPayload.weatherCode,
+          condition: om.condition ?? wttrPayload.condition,
+          label: om.label ?? wttrPayload.label,
+          humidity: om.humidity ?? wttrPayload.humidity,
+          sunrise: om.sunrise ?? wttrPayload.sunrise,
+          sunset: om.sunset ?? wttrPayload.sunset,
+          forecast: om.forecast,
+        },
+        wttrPayload
+      );
+    } catch (error) {
+      console.error(
+        '[temperatura] rescate forecast falló:',
+        error?.code || '',
+        error?.message || error
+      );
+    }
+  }
+  return null;
+}
+
+/** Completa salida/puesta solar faltantes (p.ej. Met.no) con las de wttr por fecha. */
+function mergeForecastSunTimes(primary, sunSource) {
+  if (!primary?.forecast?.length || !sunSource?.forecast?.length) return primary;
+  const byDate = new Map(
+    sunSource.forecast.map((day) => [day.date, day])
+  );
+  return {
+    ...primary,
+    sunrise: primary.sunrise || sunSource.sunrise || null,
+    sunset: primary.sunset || sunSource.sunset || null,
+    forecast: primary.forecast.map((day) => {
+      const extra = byDate.get(day.date);
+      if (!extra) return day;
+      return {
+        ...day,
+        sunrise: day.sunrise || extra.sunrise || null,
+        sunset: day.sunset || extra.sunset || null,
+      };
+    }),
+  };
+}
+
+const OPEN_METEO_PARAMS = {
+  latitude: -34.6037,
+  longitude: -58.3816,
+  current: 'temperature_2m,weather_code,relative_humidity_2m',
+  daily:
+    'weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,sunrise,sunset,relative_humidity_2m_mean',
+  timezone: 'America/Argentina/Buenos_Aires',
+  forecast_days: 7,
+};
+
 async function fetchOpenMeteoWeather(client) {
   const { data } = await client.get('https://api.open-meteo.com/v1/forecast', {
-    params: {
-      latitude: -34.6037,
-      longitude: -58.3816,
-      current: 'temperature_2m,weather_code,relative_humidity_2m',
-      daily:
-        'weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,sunrise,sunset,relative_humidity_2m_mean',
-      timezone: 'America/Argentina/Buenos_Aires',
-      forecast_days: 7,
-    },
+    params: OPEN_METEO_PARAMS,
   });
+  return parseOpenMeteoPayload(data);
+}
 
+/** Fetch nativo sin axios: útil si el Agent de axios falla en el runtime de Render. */
+function fetchOpenMeteoNative() {
+  const qs = new URLSearchParams(OPEN_METEO_PARAMS).toString();
+  const url = `https://api.open-meteo.com/v1/forecast?${qs}`;
+
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      url,
+      {
+        method: 'GET',
+        family: 4,
+        headers: jsonHeaders,
+        timeout: 25000,
+      },
+      (res) => {
+        let raw = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          raw += chunk;
+        });
+        res.on('end', () => {
+          if (res.statusCode < 200 || res.statusCode >= 400) {
+            reject(new Error(`Open-Meteo native HTTP ${res.statusCode}`));
+            return;
+          }
+          try {
+            resolve(parseOpenMeteoPayload(JSON.parse(raw)));
+          } catch (error) {
+            reject(error);
+          }
+        });
+      }
+    );
+    req.on('timeout', () => {
+      req.destroy(new Error('Open-Meteo native timeout'));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+function parseOpenMeteoPayload(data) {
   const temperature = data?.current?.temperature_2m;
   const weatherCode = data?.current?.weather_code;
   if (temperature === undefined || temperature === null) {
@@ -1180,6 +1305,175 @@ async function fetchOpenMeteoWeather(client) {
     sunset: today.sunset || null,
     forecast,
   };
+}
+
+async function fetchMetNoWeather() {
+  const { data } = await jsonHttpAuto.get(
+    'https://api.met.no/weatherapi/locationforecast/2.0/compact',
+    {
+      params: { lat: -34.6037, lon: -58.3816 },
+      headers: {
+        ...jsonHeaders,
+        // Met.no exige User-Agent identificable.
+        'User-Agent': jsonHeaders['User-Agent'],
+      },
+    }
+  );
+
+  const forecast = buildMetNoForecast(data?.properties?.timeseries);
+  if (!forecast.length) {
+    throw new Error('Met.no sin forecast diario');
+  }
+
+  const today = forecast[0];
+  const first = data?.properties?.timeseries?.[0];
+  const details = first?.data?.instant?.details || {};
+  const temperature = Number(details.air_temperature);
+  if (!Number.isFinite(temperature)) {
+    throw new Error('Met.no sin temperatura actual');
+  }
+
+  const humidityRaw = Number(details.relative_humidity);
+  const condition = mapMetNoSymbol(
+    first?.data?.next_1_hours?.summary?.symbol_code ||
+      first?.data?.next_6_hours?.summary?.symbol_code ||
+      today.condition
+  );
+
+  return {
+    temperature,
+    weatherCode: null,
+    condition,
+    label: weatherLabel(condition),
+    humidity: Number.isFinite(humidityRaw)
+      ? Math.round(humidityRaw)
+      : today.humidity ?? null,
+    sunrise: today.sunrise || null,
+    sunset: today.sunset || null,
+    forecast,
+  };
+}
+
+function buildMetNoForecast(timeseries) {
+  if (!Array.isArray(timeseries) || !timeseries.length) return [];
+
+  const byDay = new Map();
+  for (const point of timeseries) {
+    const iso = point?.time;
+    if (!iso) continue;
+    const date = toBuenosAiresDate(iso);
+    if (!date) continue;
+
+    const details = point?.data?.instant?.details || {};
+    const temp = Number(details.air_temperature);
+    const wind = Number(details.wind_speed);
+    const windDir = Number(details.wind_from_direction);
+    const humidity = Number(details.relative_humidity);
+    const precip = Number(
+      point?.data?.next_6_hours?.details?.precipitation_amount ??
+        point?.data?.next_1_hours?.details?.precipitation_amount ??
+        0
+    );
+    const symbol =
+      point?.data?.next_6_hours?.summary?.symbol_code ||
+      point?.data?.next_1_hours?.summary?.symbol_code ||
+      point?.data?.next_12_hours?.summary?.symbol_code ||
+      '';
+
+    let day = byDay.get(date);
+    if (!day) {
+      day = {
+        date,
+        temps: [],
+        winds: [],
+        windDirs: [],
+        humidities: [],
+        precipSum: 0,
+        symbols: [],
+      };
+      byDay.set(date, day);
+    }
+
+    if (Number.isFinite(temp)) day.temps.push(temp);
+    if (Number.isFinite(wind)) day.winds.push(wind * 3.6); // m/s → km/h
+    if (Number.isFinite(windDir)) day.windDirs.push(windDir);
+    if (Number.isFinite(humidity)) day.humidities.push(humidity);
+    if (Number.isFinite(precip)) day.precipSum += precip;
+    if (symbol) day.symbols.push(symbol);
+  }
+
+  return [...byDay.values()]
+    .slice(0, 7)
+    .map((day) => {
+      const condition = mapMetNoSymbol(pickMidSymbol(day.symbols) || 'cloudy');
+      const windMax = day.winds.length
+        ? Math.round(Math.max(...day.winds))
+        : 0;
+      const windMin = day.winds.length
+        ? Math.round(Math.min(...day.winds))
+        : 0;
+      const humidityAvg = day.humidities.length
+        ? Math.round(
+            day.humidities.reduce((a, b) => a + b, 0) / day.humidities.length
+          )
+        : null;
+      const precipProb = day.precipSum > 0.2 ? 40 : day.precipSum > 0 ? 20 : 0;
+
+      return {
+        date: day.date,
+        weatherCode: null,
+        condition,
+        label: weatherLabel(condition),
+        tempMax: day.temps.length ? Math.round(Math.max(...day.temps)) : null,
+        tempMin: day.temps.length ? Math.round(Math.min(...day.temps)) : null,
+        precipProbability: precipProb,
+        precipSum: Number(day.precipSum.toFixed(1)),
+        showPrecip: condition === 'rainy' || precipProb >= 30 || day.precipSum > 0,
+        windMin: Math.min(windMin, windMax),
+        windMax: Math.max(windMin, windMax),
+        windDirection: day.windDirs.length
+          ? Math.round(
+              day.windDirs.reduce((a, b) => a + b, 0) / day.windDirs.length
+            )
+          : 0,
+        humidity: humidityAvg,
+        sunrise: null,
+        sunset: null,
+      };
+    })
+    .filter((d) => d.tempMax != null && d.tempMin != null);
+}
+
+function toBuenosAiresDate(iso) {
+  try {
+    const fmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Argentina/Buenos_Aires',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+    return fmt.format(new Date(iso)); // YYYY-MM-DD
+  } catch {
+    return String(iso).slice(0, 10);
+  }
+}
+
+function pickMidSymbol(symbols) {
+  if (!symbols?.length) return '';
+  return symbols[Math.min(Math.floor(symbols.length / 2), symbols.length - 1)];
+}
+
+function mapMetNoSymbol(symbolOrCondition) {
+  const s = String(symbolOrCondition || '').toLowerCase();
+  if (['sunny', 'partly', 'cloudy', 'rainy'].includes(s)) return s;
+  if (s.includes('thunder') || s.includes('rain') || s.includes('sleet') || s.includes('snow') || s.includes('storm')) {
+    return 'rainy';
+  }
+  if (s.includes('fog') || s === 'cloudy' || s.includes('cloud')) return 'cloudy';
+  if (s.includes('partlycloudy') || s.includes('fair')) return 'partly';
+  if (s.includes('clearsky') || s.includes('fair')) return 'sunny';
+  if (s.includes('clear')) return 'sunny';
+  return 'cloudy';
 }
 
 async function fetchWttrWeather() {

@@ -1032,9 +1032,9 @@ async function fetchOpenMeteoWeather(client) {
     params: {
       latitude: -34.6037,
       longitude: -58.3816,
-      current: 'temperature_2m,weather_code',
+      current: 'temperature_2m,weather_code,relative_humidity_2m',
       daily:
-        'weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant',
+        'weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,sunrise,sunset,relative_humidity_2m_mean',
       timezone: 'America/Argentina/Buenos_Aires',
       forecast_days: 7,
     },
@@ -1046,13 +1046,22 @@ async function fetchOpenMeteoWeather(client) {
     throw new Error('Open-Meteo sin temperatura actual');
   }
 
+  const forecast = buildForecastDays(data?.daily);
+  const today = forecast[0] || {};
+  const humidityCurrent = Number(data?.current?.relative_humidity_2m);
+  const humidity = Number.isFinite(humidityCurrent)
+    ? Math.round(humidityCurrent)
+    : today.humidity ?? null;
   const condition = mapWeatherCondition(weatherCode);
   return {
     temperature,
     weatherCode,
     condition,
     label: weatherLabel(condition),
-    forecast: buildForecastDays(data?.daily),
+    humidity,
+    sunrise: today.sunrise || null,
+    sunset: today.sunset || null,
+    forecast,
   };
 }
 
@@ -1070,12 +1079,21 @@ async function fetchWttrWeather() {
 
   const code = Number(current?.weatherCode);
   const condition = mapWttrCondition(code);
+  const forecast = buildWttrForecast(data?.weather);
+  const today = forecast[0] || {};
+  const humidityCurrent = Number(current?.humidity);
+  const humidity = Number.isFinite(humidityCurrent)
+    ? Math.round(humidityCurrent)
+    : today.humidity ?? null;
   return {
     temperature,
     weatherCode: code,
     condition,
     label: weatherLabel(condition),
-    forecast: buildWttrForecast(data?.weather),
+    humidity,
+    sunrise: today.sunrise || null,
+    sunset: today.sunset || null,
+    forecast,
   };
 }
 
@@ -1104,6 +1122,8 @@ function buildWttrForecast(days) {
     const precipProb = Number(mid.chanceofrain ?? 0);
     const precipSum = Number(day.totalSnow_cm ?? 0) > 0 ? Number(day.totalSnow_cm) : Number(mid.precipMM ?? 0);
     const wind = Math.round(Number(mid.windspeedKmph ?? 0));
+    const astronomy = day?.astronomy?.[0] || {};
+    const humidityRaw = Number(mid.humidity);
     return {
       date: day.date,
       weatherCode: code,
@@ -1117,6 +1137,9 @@ function buildWttrForecast(days) {
       windMin: wind,
       windMax: wind,
       windDirection: Number(mid.winddirDegree ?? 0),
+      humidity: Number.isFinite(humidityRaw) ? Math.round(humidityRaw) : null,
+      sunrise: formatSunClock(astronomy.sunrise),
+      sunset: formatSunClock(astronomy.sunset),
     };
   });
 }
@@ -1131,6 +1154,7 @@ function buildForecastDays(daily) {
     const precipSum = Number(daily.precipitation_sum?.[index] ?? 0);
     const windMin = Math.round(Number(daily.wind_speed_10m_max?.[index] ?? 0));
     const windMax = Math.round(Number(daily.wind_gusts_10m_max?.[index] ?? windMin));
+    const humidityRaw = Number(daily.relative_humidity_2m_mean?.[index]);
 
     return {
       date,
@@ -1145,8 +1169,36 @@ function buildForecastDays(daily) {
       windMin: Math.min(windMin, windMax),
       windMax: Math.max(windMin, windMax),
       windDirection: Number(daily.wind_direction_10m_dominant?.[index] ?? 0),
+      humidity: Number.isFinite(humidityRaw) ? Math.round(humidityRaw) : null,
+      sunrise: formatSunClock(daily.sunrise?.[index]),
+      sunset: formatSunClock(daily.sunset?.[index]),
     };
   });
+}
+
+/** Normaliza ISO Open-Meteo o "06:45 AM" de wttr → "HH:mm". */
+function formatSunClock(value) {
+  if (value == null) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  const isoMatch = raw.match(/T(\d{2}):(\d{2})/);
+  if (isoMatch) return `${isoMatch[1]}:${isoMatch[2]}`;
+
+  const ampm = raw.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (ampm) {
+    let hour = Number(ampm[1]);
+    const minute = ampm[2];
+    const period = ampm[3].toUpperCase();
+    if (period === 'AM' && hour === 12) hour = 0;
+    if (period === 'PM' && hour !== 12) hour += 12;
+    return `${String(hour).padStart(2, '0')}:${minute}`;
+  }
+
+  const h24 = raw.match(/^(\d{1,2}):(\d{2})$/);
+  if (h24) return `${String(Number(h24[1])).padStart(2, '0')}:${h24[2]}`;
+
+  return null;
 }
 
 function mapWeatherCondition(code) {

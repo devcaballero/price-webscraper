@@ -36,6 +36,8 @@ const jsonHttp = axios.create({
   httpsAgent: new https.Agent({
     keepAlive: true,
     minVersion: 'TLSv1.2',
+    // Render a veces falla IPv6 hacia APIs externas; forzar IPv4.
+    family: 4,
   }),
   validateStatus: (status) => status >= 200 && status < 400,
 });
@@ -447,7 +449,25 @@ async function getBitcoinPayload() {
     return bitcoinCache.payload;
   }
 
-  const { data } = await http.get(
+  const { value, source } = await withFallbacks(
+    [
+      { name: 'coingecko', fetch: () => fetchBitcoinCoinGecko() },
+      { name: 'binance', fetch: () => fetchBitcoinBinance() },
+    ],
+    {
+      label: 'bitcoin',
+      isValid: (p) => p != null && p.precio != null && Array.isArray(p.historial) && p.historial.length > 0,
+    }
+  );
+
+  console.log(`[bitcoin] fuente: ${source}`);
+  bitcoinCache.at = Date.now();
+  bitcoinCache.payload = value;
+  return value;
+}
+
+async function fetchBitcoinCoinGecko() {
+  const { data } = await jsonHttp.get(
     'https://api.coingecko.com/api/v3/coins/bitcoin/market_chart',
     {
       params: {
@@ -470,7 +490,40 @@ async function getBitcoinPayload() {
     .map(([fecha, precio]) => ({ fecha, precio }))
     .sort((a, b) => a.fecha.localeCompare(b.fecha));
 
-  if (!series.length) {
+  return buildBitcoinPayloadFromSeries(series);
+}
+
+async function fetchBitcoinBinance() {
+  const { data: klines } = await jsonHttp.get('https://api.binance.com/api/v3/klines', {
+    params: {
+      symbol: 'BTCUSDT',
+      interval: '1d',
+      limit: 10,
+    },
+  });
+
+  if (!Array.isArray(klines) || !klines.length) {
+    throw new Error('Binance sin klines de BTC');
+  }
+
+  const series = klines
+    .map((row) => {
+      const openTime = Number(row?.[0]);
+      const close = Number(row?.[4]);
+      if (!Number.isFinite(openTime) || !Number.isFinite(close)) return null;
+      return {
+        fecha: new Date(openTime).toISOString().slice(0, 10),
+        precio: close,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.fecha.localeCompare(b.fecha));
+
+  return buildBitcoinPayloadFromSeries(series);
+}
+
+function buildBitcoinPayloadFromSeries(series) {
+  if (!Array.isArray(series) || !series.length) {
     throw new Error('Historial de Bitcoin vacío');
   }
 
@@ -490,11 +543,15 @@ async function getBitcoinPayload() {
     };
   });
 
+  if (!historial.length) {
+    throw new Error('Ventana de Bitcoin vacía');
+  }
+
   const hoy = historial[historial.length - 1];
   const ayer = historial.length >= 2 ? historial[historial.length - 2] : null;
   const variacionPct = hoy?.variacionPct ?? null;
 
-  const payload = {
+  return {
     precio: hoy.precio,
     precioLabel: hoy.precio.toFixed(2).replace('.', ','),
     variacion:
@@ -507,10 +564,6 @@ async function getBitcoinPayload() {
           },
     historial,
   };
-
-  bitcoinCache.at = Date.now();
-  bitcoinCache.payload = payload;
-  return payload;
 }
 
 app.get('/api/v1/bitcoin', async (_req, res) => {

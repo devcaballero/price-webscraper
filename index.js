@@ -36,6 +36,8 @@ const jsonHttp = axios.create({
   httpsAgent: new https.Agent({
     keepAlive: true,
     minVersion: 'TLSv1.2',
+    // Render a veces falla IPv6 hacia APIs externas; forzar IPv4.
+    family: 4,
   }),
   validateStatus: (status) => status >= 200 && status < 400,
 });
@@ -447,7 +449,25 @@ async function getBitcoinPayload() {
     return bitcoinCache.payload;
   }
 
-  const { data } = await http.get(
+  const { value, source } = await withFallbacks(
+    [
+      { name: 'coingecko', fetch: () => fetchBitcoinCoinGecko() },
+      { name: 'binance', fetch: () => fetchBitcoinBinance() },
+    ],
+    {
+      label: 'bitcoin',
+      isValid: (p) => p != null && p.precio != null && Array.isArray(p.historial) && p.historial.length > 0,
+    }
+  );
+
+  console.log(`[bitcoin] fuente: ${source}`);
+  bitcoinCache.at = Date.now();
+  bitcoinCache.payload = value;
+  return value;
+}
+
+async function fetchBitcoinCoinGecko() {
+  const { data } = await jsonHttp.get(
     'https://api.coingecko.com/api/v3/coins/bitcoin/market_chart',
     {
       params: {
@@ -470,7 +490,40 @@ async function getBitcoinPayload() {
     .map(([fecha, precio]) => ({ fecha, precio }))
     .sort((a, b) => a.fecha.localeCompare(b.fecha));
 
-  if (!series.length) {
+  return buildBitcoinPayloadFromSeries(series);
+}
+
+async function fetchBitcoinBinance() {
+  const { data: klines } = await jsonHttp.get('https://api.binance.com/api/v3/klines', {
+    params: {
+      symbol: 'BTCUSDT',
+      interval: '1d',
+      limit: 10,
+    },
+  });
+
+  if (!Array.isArray(klines) || !klines.length) {
+    throw new Error('Binance sin klines de BTC');
+  }
+
+  const series = klines
+    .map((row) => {
+      const openTime = Number(row?.[0]);
+      const close = Number(row?.[4]);
+      if (!Number.isFinite(openTime) || !Number.isFinite(close)) return null;
+      return {
+        fecha: new Date(openTime).toISOString().slice(0, 10),
+        precio: close,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.fecha.localeCompare(b.fecha));
+
+  return buildBitcoinPayloadFromSeries(series);
+}
+
+function buildBitcoinPayloadFromSeries(series) {
+  if (!Array.isArray(series) || !series.length) {
     throw new Error('Historial de Bitcoin vacío');
   }
 
@@ -490,11 +543,15 @@ async function getBitcoinPayload() {
     };
   });
 
+  if (!historial.length) {
+    throw new Error('Ventana de Bitcoin vacía');
+  }
+
   const hoy = historial[historial.length - 1];
   const ayer = historial.length >= 2 ? historial[historial.length - 2] : null;
   const variacionPct = hoy?.variacionPct ?? null;
 
-  const payload = {
+  return {
     precio: hoy.precio,
     precioLabel: hoy.precio.toFixed(2).replace('.', ','),
     variacion:
@@ -507,10 +564,6 @@ async function getBitcoinPayload() {
           },
     historial,
   };
-
-  bitcoinCache.at = Date.now();
-  bitcoinCache.payload = payload;
-  return payload;
 }
 
 app.get('/api/v1/bitcoin', async (_req, res) => {
@@ -1009,18 +1062,82 @@ app.get('/api/v1/temperatura', async (_req, res) => {
 
 async function getTemperaturaPayload() {
   try {
-    const { value } = await withFallbacks(
-      [
-        { name: 'open-meteo-json', fetch: () => fetchOpenMeteoWeather(jsonHttp) },
-        { name: 'open-meteo-http', fetch: () => fetchOpenMeteoWeather(http) },
-        { name: 'wttr', fetch: () => fetchWttrWeather() },
-      ],
-      {
-        label: 'temperatura',
-        isValid: (p) => p != null && p.temperature != null,
+    // Paralelo: Open-Meteo (7 días) vs wttr (3 días). Preferimos OM siempre que responda.
+    const settled = await Promise.allSettled([
+      fetchOpenMeteoWeather(jsonHttp).then((payload) => ({
+        name: 'open-meteo-json',
+        payload,
+      })),
+      fetchOpenMeteoWeather(http).then((payload) => ({
+        name: 'open-meteo-http',
+        payload,
+      })),
+      fetchWttrWeather().then((payload) => ({ name: 'wttr', payload })),
+    ]);
+
+    const ok = settled
+      .filter((r) => r.status === 'fulfilled')
+      .map((r) => r.value)
+      .filter((x) => x?.payload != null && x.payload.temperature != null);
+
+    for (const r of settled) {
+      if (r.status === 'rejected') {
+        console.error(
+          '[temperatura] fuente falló:',
+          r.reason?.code || '',
+          r.reason?.message || r.reason
+        );
       }
-    );
-    return value;
+    }
+
+    if (!ok.length) return null;
+
+    const openMeteo = ok.find((x) => x.name.startsWith('open-meteo'));
+    const wttr = ok.find((x) => x.name === 'wttr');
+
+    if (openMeteo) {
+      console.log(
+        `[temperatura] fuente: ${openMeteo.name} | días=${openMeteo.payload.forecast?.length || 0}`
+      );
+      return openMeteo.payload;
+    }
+
+    // Solo wttr: intenta rescatar el forecast de 7 días desde Open-Meteo.
+    if (wttr) {
+      try {
+        const om = await fetchOpenMeteoWeather(jsonHttp);
+        if (om?.forecast?.length) {
+          console.log(
+            `[temperatura] fuente: wttr+open-meteo-forecast | días=${om.forecast.length}`
+          );
+          return {
+            ...wttr.payload,
+            // Condición/temp actuales: preferir OM si el rescate trae current válido
+            temperature: om.temperature ?? wttr.payload.temperature,
+            weatherCode: om.weatherCode ?? wttr.payload.weatherCode,
+            condition: om.condition ?? wttr.payload.condition,
+            label: om.label ?? wttr.payload.label,
+            humidity: om.humidity ?? wttr.payload.humidity,
+            sunrise: om.sunrise ?? wttr.payload.sunrise,
+            sunset: om.sunset ?? wttr.payload.sunset,
+            forecast: om.forecast,
+          };
+        }
+      } catch (error) {
+        console.error(
+          '[temperatura] rescate open-meteo forecast falló:',
+          error?.code || '',
+          error?.message || error
+        );
+      }
+
+      console.log(
+        `[temperatura] fuente: wttr | días=${wttr.payload.forecast?.length || 0}`
+      );
+      return wttr.payload;
+    }
+
+    return null;
   } catch (error) {
     if (error instanceof AllSourcesFailedError) return null;
     throw error;

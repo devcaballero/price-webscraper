@@ -1138,21 +1138,22 @@ async function getTemperaturaPayload() {
       console.log(
         `[temperatura] fuente: ${preferred.name} | días=${preferred.payload.forecast?.length || 0}`
       );
+      let payload = preferred.payload;
       if (preferred.name === 'met-no' && wttr?.payload) {
-        return mergeForecastSunTimes(preferred.payload, wttr.payload);
+        payload = mergeForecastSunTimes(payload, wttr.payload);
       }
-      return preferred.payload;
+      return ensureForecastSunTimes(payload);
     }
 
     // Solo wttr (3 días): si Met.no/OM llegaron sin temperature filter miss, reintentar forecast.
     if (wttr) {
       const rescued = await rescueExtendedForecast(wttr.payload);
-      if (rescued) return rescued;
+      if (rescued) return ensureForecastSunTimes(rescued);
 
       console.log(
         `[temperatura] fuente: wttr | días=${wttr.payload.forecast?.length || 0}`
       );
-      return wttr.payload;
+      return ensureForecastSunTimes(wttr.payload);
     }
 
     return null;
@@ -1221,6 +1222,108 @@ function mergeForecastSunTimes(primary, sunSource) {
       };
     }),
   };
+}
+
+/**
+ * Rellena sunrise/sunset faltantes con cálculo local para CABA.
+ * Met.no no trae astronomía; wttr solo cubre ~3 días.
+ */
+function ensureForecastSunTimes(payload) {
+  if (!payload?.forecast?.length) return payload;
+
+  const forecast = payload.forecast.map((day) => {
+    if (day.sunrise && day.sunset) return day;
+    const computed = computeBuenosAiresSunTimes(day.date);
+    if (!computed) return day;
+    return {
+      ...day,
+      sunrise: day.sunrise || computed.sunrise,
+      sunset: day.sunset || computed.sunset,
+    };
+  });
+
+  const today = forecast[0] || {};
+  return {
+    ...payload,
+    sunrise: payload.sunrise || today.sunrise || null,
+    sunset: payload.sunset || today.sunset || null,
+    forecast,
+  };
+}
+
+const BA_LAT = -34.6037;
+const BA_LON = -58.3816;
+/** Argentina continental: UTC−3 fijo (sin DST). */
+const BA_TZ_HOURS = -3;
+
+/**
+ * Salida/puesta solar aproximada (NOAA) en HH:mm hora de Buenos Aires.
+ * Suficiente para el widget; no depende de APIs externas.
+ */
+function computeBuenosAiresSunTimes(dateStr) {
+  if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return null;
+  const [year, month, day] = dateStr.split('-').map(Number);
+  const dayOfYear = dayOfYearUtc(year, month, day);
+  if (!dayOfYear) return null;
+
+  const sunriseUtc = solarUtcHours(dayOfYear, BA_LAT, BA_LON, true);
+  const sunsetUtc = solarUtcHours(dayOfYear, BA_LAT, BA_LON, false);
+  if (sunriseUtc == null || sunsetUtc == null) return null;
+
+  return {
+    sunrise: formatUtcHoursAsBaClock(sunriseUtc),
+    sunset: formatUtcHoursAsBaClock(sunsetUtc),
+  };
+}
+
+function dayOfYearUtc(year, month, day) {
+  const date = Date.UTC(year, month - 1, day);
+  const start = Date.UTC(year, 0, 0);
+  return Math.round((date - start) / 86400000);
+}
+
+function solarUtcHours(dayOfYear, lat, lon, isSunrise) {
+  const rad = Math.PI / 180;
+  const lngHour = lon / 15;
+  const t = dayOfYear + ((isSunrise ? 6 : 18) - lngHour) / 24;
+  let M = 0.9856 * t - 3.289;
+  let L =
+    M +
+    1.916 * Math.sin(M * rad) +
+    0.02 * Math.sin(2 * M * rad) +
+    282.634;
+  L = ((L % 360) + 360) % 360;
+
+  let RA = Math.atan(0.91764 * Math.tan(L * rad)) / rad;
+  RA = ((RA % 360) + 360) % 360;
+  const Lquadrant = Math.floor(L / 90) * 90;
+  const RAquadrant = Math.floor(RA / 90) * 90;
+  RA = (RA + (Lquadrant - RAquadrant)) / 15;
+
+  const sinDec = 0.39782 * Math.sin(L * rad);
+  const cosDec = Math.cos(Math.asin(sinDec));
+  const cosH =
+    (Math.cos(90.833 * rad) - sinDec * Math.sin(lat * rad)) /
+    (cosDec * Math.cos(lat * rad));
+  if (cosH > 1 || cosH < -1) return null;
+
+  let H = Math.acos(cosH) / rad;
+  if (isSunrise) H = 360 - H;
+  H /= 15;
+
+  const T = H + RA - 0.06571 * t - 6.622;
+  return ((T - lngHour) % 24 + 24) % 24;
+}
+
+function formatUtcHoursAsBaClock(utcHours) {
+  let local = utcHours + BA_TZ_HOURS;
+  local = ((local % 24) + 24) % 24;
+  const hour = Math.floor(local);
+  const minute = Math.round((local - hour) * 60);
+  if (minute === 60) {
+    return `${String((hour + 1) % 24).padStart(2, '0')}:00`;
+  }
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
 }
 
 const OPEN_METEO_PARAMS = {

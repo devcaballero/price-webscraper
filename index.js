@@ -474,14 +474,34 @@ async function getBitcoinPayload() {
     return bitcoinCache.payload;
   }
 
+  // En Render CoinGecko/Binance suelen fallar (rate-limit / red). Varias fuentes + clientes.
   const { value, source } = await withFallbacks(
     [
-      { name: 'coingecko', fetch: () => fetchBitcoinCoinGecko() },
-      { name: 'binance', fetch: () => fetchBitcoinBinance() },
+      { name: 'coingecko', fetch: () => fetchBitcoinCoinGecko(jsonHttpAuto) },
+      { name: 'coingecko-ipv4', fetch: () => fetchBitcoinCoinGecko(jsonHttp) },
+      {
+        name: 'binance-vision',
+        fetch: () =>
+          fetchBitcoinBinance(jsonHttpAuto, 'https://data-api.binance.vision'),
+      },
+      {
+        name: 'binance',
+        fetch: () => fetchBitcoinBinance(jsonHttpAuto, 'https://api.binance.com'),
+      },
+      {
+        name: 'binance-ipv4',
+        fetch: () => fetchBitcoinBinance(jsonHttp, 'https://api.binance.com'),
+      },
+      { name: 'coinbase', fetch: () => fetchBitcoinCoinbase(jsonHttpAuto) },
+      { name: 'kraken', fetch: () => fetchBitcoinKraken(jsonHttpAuto) },
     ],
     {
       label: 'bitcoin',
-      isValid: (p) => p != null && p.precio != null && Array.isArray(p.historial) && p.historial.length > 0,
+      isValid: (p) =>
+        p != null &&
+        p.precio != null &&
+        Array.isArray(p.historial) &&
+        p.historial.length > 0,
     }
   );
 
@@ -491,14 +511,13 @@ async function getBitcoinPayload() {
   return value;
 }
 
-async function fetchBitcoinCoinGecko() {
-  const { data } = await jsonHttp.get(
+async function fetchBitcoinCoinGecko(client) {
+  const { data } = await client.get(
     'https://api.coingecko.com/api/v3/coins/bitcoin/market_chart',
     {
       params: {
         vs_currency: 'usd',
         days: 7,
-        interval: 'daily',
       },
     }
   );
@@ -518,8 +537,9 @@ async function fetchBitcoinCoinGecko() {
   return buildBitcoinPayloadFromSeries(series);
 }
 
-async function fetchBitcoinBinance() {
-  const { data: klines } = await jsonHttp.get('https://api.binance.com/api/v3/klines', {
+async function fetchBitcoinBinance(client, baseUrl) {
+  const root = String(baseUrl || 'https://api.binance.com').replace(/\/$/, '');
+  const { data: klines } = await client.get(`${root}/api/v3/klines`, {
     params: {
       symbol: 'BTCUSDT',
       interval: '1d',
@@ -538,6 +558,82 @@ async function fetchBitcoinBinance() {
       if (!Number.isFinite(openTime) || !Number.isFinite(close)) return null;
       return {
         fecha: new Date(openTime).toISOString().slice(0, 10),
+        precio: close,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.fecha.localeCompare(b.fecha));
+
+  return buildBitcoinPayloadFromSeries(series);
+}
+
+/** Coinbase Exchange daily candles → serie close. */
+async function fetchBitcoinCoinbase(client) {
+  const end = Math.floor(Date.now() / 1000);
+  const start = end - 10 * 86400;
+  const { data } = await client.get(
+    'https://api.exchange.coinbase.com/products/BTC-USD/candles',
+    {
+      params: {
+        granularity: 86400,
+        start: new Date(start * 1000).toISOString(),
+        end: new Date(end * 1000).toISOString(),
+      },
+    }
+  );
+
+  if (!Array.isArray(data) || !data.length) {
+    throw new Error('Coinbase sin candles de BTC');
+  }
+
+  // [time, low, high, open, close, volume] — time en segundos
+  const series = data
+    .map((row) => {
+      const ts = Number(row?.[0]);
+      const close = Number(row?.[4]);
+      if (!Number.isFinite(ts) || !Number.isFinite(close)) return null;
+      return {
+        fecha: new Date(ts * 1000).toISOString().slice(0, 10),
+        precio: close,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.fecha.localeCompare(b.fecha));
+
+  return buildBitcoinPayloadFromSeries(series);
+}
+
+/** Kraken daily OHLC → serie close. */
+async function fetchBitcoinKraken(client) {
+  const { data } = await client.get('https://api.kraken.com/0/public/OHLC', {
+    params: {
+      pair: 'XBTUSD',
+      interval: 1440,
+    },
+  });
+
+  if (data?.error?.length) {
+    throw new Error(`Kraken: ${data.error.join(', ')}`);
+  }
+
+  const rows =
+    data?.result?.XXBTZUSD ||
+    data?.result?.XBTUSD ||
+    Object.values(data?.result || {}).find((v) => Array.isArray(v));
+
+  if (!Array.isArray(rows) || !rows.length) {
+    throw new Error('Kraken sin OHLC de BTC');
+  }
+
+  // [time, open, high, low, close, vwap, volume, count]
+  const series = rows
+    .slice(-10)
+    .map((row) => {
+      const ts = Number(row?.[0]);
+      const close = Number(row?.[4]);
+      if (!Number.isFinite(ts) || !Number.isFinite(close)) return null;
+      return {
+        fecha: new Date(ts * 1000).toISOString().slice(0, 10),
         precio: close,
       };
     })

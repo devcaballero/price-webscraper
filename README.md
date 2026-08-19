@@ -58,7 +58,7 @@ Hay endpoints legacy adicionales (Fernet, Heineken, etc.) que el front actual pu
 ## Fuentes (resumen)
 
 - Dólar: [dolarapi.com](https://dolarapi.com) + historial [ArgentinaDatos](https://api.argentinadatos.com)
-- Bitcoin: [CoinGecko](https://www.coingecko.com/en/api) `market_chart` → [Binance](https://api.binance.com) klines si CoinGecko falla (típico en Render)
+- Bitcoin: [CoinGecko](https://www.coingecko.com/en/api) → [Binance](https://api.binance.com) / [Binance Vision](https://data-api.binance.vision) → [Coinbase](https://api.exchange.coinbase.com) → [Kraken](https://api.kraken.com) (varios clientes HTTP; típico fallo en Render)
 - Oro: [goldprice.dev](https://goldprice.dev) spot + barras diarias
 - Inflación: [apis.datos.gob.ar](https://apis.datos.gob.ar) (IPC nacional)
 - Tasa: [API BCRA v4](https://api.bcra.gob.ar) monetarias — BADLAR → TPM

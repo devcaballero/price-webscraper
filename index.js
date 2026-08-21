@@ -35,7 +35,7 @@ const http = axios.create({
 });
 
 const jsonHeaders = {
-  'User-Agent': 'hola-argentina-api/1.1 (+https://github.com/devcaballero/price-webscraper)',
+  'User-Agent': 'hola-argentina-api/1.1 (+https://github.com/devcaballero/hola-argentina-api)',
   Accept: 'application/json',
 };
 
@@ -74,7 +74,7 @@ const jsonHttpAuto = axios.create({
 const bcraHttp = axios.create({
   timeout: 25000,
   headers: {
-    'User-Agent': 'hola-argentina-api/1.1 (+https://github.com/devcaballero/price-webscraper)',
+    'User-Agent': 'hola-argentina-api/1.1 (+https://github.com/devcaballero/hola-argentina-api)',
     Accept: 'application/json',
   },
   httpsAgent: new https.Agent({

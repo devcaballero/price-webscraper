@@ -1,8 +1,10 @@
-# price-webscraper
+# hola-argentina-api
 
-API Node/Express que alimenta **Hola Argentina** (`panel-informativo-front`).
+API Node/Express que alimenta **Hola Argentina** (`hola-argentina-front`).
 
 Expone cotizaciones, IPC INDEC, tasas BCRA, clima y precios varios bajo `/api/v1`.
+
+> Antes se llamaba `price-webscraper`. Repo: [devcaballero/hola-argentina-api](https://github.com/devcaballero/hola-argentina-api).
 
 ## Requisitos
 
@@ -89,7 +91,9 @@ Para agregar una alternativa a un endpoint nuevo: definir `{ name, fetch }` y pa
 
 ## Deploy
 
-Prod típico en Render: `https://price-webscraper.onrender.com`.
+Prod en Render (hostname actual del servicio): `https://price-webscraper.onrender.com`.
+
+El servicio en Render todavía puede llamarse `price-webscraper`; renombrarlo en el dashboard (y el subdomain) es opcional y aparte del rename del repo.
 
 Tras merges a `main`, a veces hace falta **redeploy manual** en Render.
 
@@ -102,8 +106,8 @@ El front de producción apunta a `…/api/v1` vía `environment.prod.ts`.
 ## Relación con el front
 
 ```
-panel-informativo-front  →  GET /api/v1/*
-price-webscraper         →  scrapers / APIs públicas
+hola-argentina-front  →  GET /api/v1/*
+hola-argentina-api    →  scrapers / APIs públicas
 ```
 
 Sin este servicio, el panel no tiene datos.

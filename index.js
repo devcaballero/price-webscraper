@@ -1280,6 +1280,7 @@ async function rescueExtendedForecast(wttrPayload) {
           weatherCode: om.weatherCode ?? wttrPayload.weatherCode,
           condition: om.condition ?? wttrPayload.condition,
           label: om.label ?? wttrPayload.label,
+          isDay: om.isDay ?? wttrPayload.isDay,
           humidity: om.humidity ?? wttrPayload.humidity,
           sunrise: om.sunrise ?? wttrPayload.sunrise,
           sunset: om.sunset ?? wttrPayload.sunset,
@@ -1304,7 +1305,7 @@ function mergeForecastSunTimes(primary, sunSource) {
   const byDate = new Map(
     sunSource.forecast.map((day) => [day.date, day])
   );
-  return {
+  return normalizeCurrentDayNight({
     ...primary,
     sunrise: primary.sunrise || sunSource.sunrise || null,
     sunset: primary.sunset || sunSource.sunset || null,
@@ -1317,7 +1318,7 @@ function mergeForecastSunTimes(primary, sunSource) {
         sunset: day.sunset || extra.sunset || null,
       };
     }),
-  };
+  });
 }
 
 /**
@@ -1325,7 +1326,7 @@ function mergeForecastSunTimes(primary, sunSource) {
  * Met.no no trae astronomía; wttr solo cubre ~3 días.
  */
 function ensureForecastSunTimes(payload) {
-  if (!payload?.forecast?.length) return payload;
+  if (!payload?.forecast?.length) return normalizeCurrentDayNight(payload);
 
   const forecast = payload.forecast.map((day) => {
     if (day.sunrise && day.sunset) return day;
@@ -1339,11 +1340,32 @@ function ensureForecastSunTimes(payload) {
   });
 
   const today = forecast[0] || {};
-  return {
+  return normalizeCurrentDayNight({
     ...payload,
     sunrise: payload.sunrise || today.sunrise || null,
     sunset: payload.sunset || today.sunset || null,
     forecast,
+  });
+}
+
+/** After sunrise/sunset are known, remap clear-sky-at-night away from "sunny". */
+function normalizeCurrentDayNight(payload) {
+  if (!payload) return payload;
+  let isDay = payload.isDay;
+  if (typeof isDay !== 'boolean') {
+    isDay = isDaytimeFromSun(payload.sunrise, payload.sunset);
+  }
+  const baseCondition =
+    payload.condition === 'clearnight' ? 'sunny' : payload.condition;
+  const condition = resolveClearNight(baseCondition, isDay);
+  if (condition === payload.condition && isDay === payload.isDay) {
+    return payload;
+  }
+  return {
+    ...payload,
+    isDay,
+    condition,
+    label: weatherLabel(condition),
   };
 }
 
@@ -1425,7 +1447,7 @@ function formatUtcHoursAsBaClock(utcHours) {
 const OPEN_METEO_PARAMS = {
   latitude: -34.6037,
   longitude: -58.3816,
-  current: 'temperature_2m,weather_code,relative_humidity_2m',
+  current: 'temperature_2m,weather_code,relative_humidity_2m,is_day',
   daily:
     'weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,sunrise,sunset,relative_humidity_2m_mean',
   timezone: 'America/Argentina/Buenos_Aires',
@@ -1493,15 +1515,23 @@ function parseOpenMeteoPayload(data) {
   const humidity = Number.isFinite(humidityCurrent)
     ? Math.round(humidityCurrent)
     : today.humidity ?? null;
-  const condition = mapWeatherCondition(weatherCode);
+  const sunrise = today.sunrise || null;
+  const sunset = today.sunset || null;
+  const isDayRaw = data?.current?.is_day;
+  const isDay =
+    isDayRaw === 0 || isDayRaw === 1
+      ? isDayRaw === 1
+      : isDaytimeFromSun(sunrise, sunset);
+  const condition = resolveClearNight(mapWeatherCondition(weatherCode), isDay);
   return {
     temperature,
     weatherCode,
     condition,
     label: weatherLabel(condition),
+    isDay,
     humidity,
-    sunrise: today.sunrise || null,
-    sunset: today.sunset || null,
+    sunrise,
+    sunset,
     forecast,
   };
 }
@@ -1533,22 +1563,30 @@ async function fetchMetNoWeather() {
   }
 
   const humidityRaw = Number(details.relative_humidity);
-  const condition = mapMetNoSymbol(
+  const symbol =
     first?.data?.next_1_hours?.summary?.symbol_code ||
-      first?.data?.next_6_hours?.summary?.symbol_code ||
-      today.condition
-  );
+    first?.data?.next_6_hours?.summary?.symbol_code ||
+    today.condition;
+  const sunrise = today.sunrise || null;
+  const sunset = today.sunset || null;
+  const isDayFromSymbol = metNoSymbolIsDay(symbol);
+  const isDay =
+    isDayFromSymbol != null
+      ? isDayFromSymbol
+      : isDaytimeFromSun(sunrise, sunset);
+  const condition = resolveClearNight(mapMetNoSymbol(symbol), isDay);
 
   return {
     temperature,
     weatherCode: null,
     condition,
     label: weatherLabel(condition),
+    isDay,
     humidity: Number.isFinite(humidityRaw)
       ? Math.round(humidityRaw)
       : today.humidity ?? null,
-    sunrise: today.sunrise || null,
-    sunset: today.sunset || null,
+    sunrise,
+    sunset,
     forecast,
   };
 }
@@ -1664,15 +1702,24 @@ function pickMidSymbol(symbols) {
 
 function mapMetNoSymbol(symbolOrCondition) {
   const s = String(symbolOrCondition || '').toLowerCase();
-  if (['sunny', 'partly', 'cloudy', 'rainy'].includes(s)) return s;
+  if (['sunny', 'partly', 'cloudy', 'rainy', 'clearnight'].includes(s)) return s;
   if (s.includes('thunder') || s.includes('rain') || s.includes('sleet') || s.includes('snow') || s.includes('storm')) {
     return 'rainy';
   }
   if (s.includes('fog') || s === 'cloudy' || s.includes('cloud')) return 'cloudy';
   if (s.includes('partlycloudy') || s.includes('fair')) return 'partly';
-  if (s.includes('clearsky') || s.includes('fair')) return 'sunny';
-  if (s.includes('clear')) return 'sunny';
+  if (s.includes('clearsky') || s.includes('clear')) {
+    return s.includes('night') ? 'clearnight' : 'sunny';
+  }
   return 'cloudy';
+}
+
+/** Met.no symbols often end in _day / _night. */
+function metNoSymbolIsDay(symbol) {
+  const s = String(symbol || '').toLowerCase();
+  if (s.includes('_night') || s.endsWith('night')) return false;
+  if (s.includes('_day') || s.endsWith('day')) return true;
+  return null;
 }
 
 async function fetchWttrWeather() {
@@ -1688,9 +1735,18 @@ async function fetchWttrWeather() {
   }
 
   const code = Number(current?.weatherCode);
-  const condition = mapWttrCondition(code);
   const forecast = buildWttrForecast(data?.weather);
   const today = forecast[0] || {};
+  const sunrise = today.sunrise || null;
+  const sunset = today.sunset || null;
+  const isDayFlag = String(current?.isday ?? current?.isDay ?? '').toLowerCase();
+  const isDay =
+    isDayFlag === 'yes' || isDayFlag === '1'
+      ? true
+      : isDayFlag === 'no' || isDayFlag === '0'
+        ? false
+        : isDaytimeFromSun(sunrise, sunset);
+  const condition = resolveClearNight(mapWttrCondition(code), isDay);
   const humidityCurrent = Number(current?.humidity);
   const humidity = Number.isFinite(humidityCurrent)
     ? Math.round(humidityCurrent)
@@ -1700,9 +1756,10 @@ async function fetchWttrWeather() {
     weatherCode: code,
     condition,
     label: weatherLabel(condition),
+    isDay,
     humidity,
-    sunrise: today.sunrise || null,
-    sunset: today.sunset || null,
+    sunrise,
+    sunset,
     forecast,
   };
 }
@@ -1828,8 +1885,43 @@ function mapWeatherCondition(code) {
   return 'cloudy';
 }
 
+/** Clear sky at night is not "sunny" — map to clearnight for label/icon. */
+function resolveClearNight(condition, isDay) {
+  if (condition === 'sunny' && isDay === false) return 'clearnight';
+  return condition;
+}
+
+function clockToMinutes(hhmm) {
+  const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+function buenosAiresClockMinutes(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'America/Argentina/Buenos_Aires',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  const hour = Number(parts.find((p) => p.type === 'hour')?.value);
+  const minute = Number(parts.find((p) => p.type === 'minute')?.value);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+  return hour * 60 + minute;
+}
+
+/** true/false if sunrise+sunset known; null if unknown. */
+function isDaytimeFromSun(sunrise, sunset) {
+  const now = buenosAiresClockMinutes();
+  const rise = clockToMinutes(sunrise);
+  const set = clockToMinutes(sunset);
+  if (now == null || rise == null || set == null) return null;
+  return now >= rise && now < set;
+}
+
 function weatherLabel(condition) {
   if (condition === 'sunny') return 'Soleado';
+  if (condition === 'clearnight') return 'Despejado';
   if (condition === 'partly') return 'Parcialmente nublado';
   if (condition === 'rainy') return 'Lluvia';
   return 'Nublado';
